@@ -1,4 +1,4 @@
-name: Build KernelSU-Next Kernel
+name: Build SukiSU-Ultra with SusFS
 
 on:
   workflow_dispatch:
