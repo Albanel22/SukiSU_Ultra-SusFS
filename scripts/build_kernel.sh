@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # =============================================================================
-# V4.0 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
+# V4.1 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
+#        + Fix MODULE_IMPORT_NS pour noyau 4.19
 # Testé pour noyau 4.19 - Motorola One 5G Ace (kiev)
 # =============================================================================
 
@@ -107,6 +108,28 @@ echo "=== Static exports SELinux ==="
     sed -i 's/^static struct security_operations selinux_ops/struct security_operations selinux_ops/' security/selinux/hooks.c
 }
 
+# ==================== 2e. FIX O_CLOEXEC ====================
+echo ""
+echo "=== Fix O_CLOEXEC dans TOUS les fichiers (détection Manager) ==="
+
+FILES_GET_UNUSED=$(grep -rl "get_unused_fd_flags(O_CLOEXEC)" "$KSU_DIR/" 2>/dev/null || true)
+if [ -n "$FILES_GET_UNUSED" ]; then
+    for f in $FILES_GET_UNUSED; do
+        sed -i 's/get_unused_fd_flags(O_CLOEXEC)/get_unused_fd_flags(0)/g' "$f"
+        echo "  ✅ get_unused_fd_flags fixé dans $f"
+    done
+fi
+
+FILES_ANON_INODE=$(grep -rl "anon_inode_getfile" "$KSU_DIR/" 2>/dev/null || true)
+if [ -n "$FILES_ANON_INODE" ]; then
+    for f in $FILES_ANON_INODE; do
+        sed -i 's/O_RDWR | O_CLOEXEC/O_RDWR/g' "$f"
+        sed -i 's/O_RDWR|O_CLOEXEC/O_RDWR/g' "$f"
+        sed -i 's/, O_CLOEXEC)/)/g' "$f"
+        echo "  ✅ anon_inode_getfile nettoyé dans $f"
+    done
+fi
+
 # ==================== 3. PATCHS MANUELS SukiSU-Ultra ====================
 echo ""
 echo "=== Application des patchs manuels SukiSU-Ultra ==="
@@ -126,7 +149,7 @@ if 'ksu_handle_execveat' not in content:
 else:
     print("✅ fs/exec.c déjà patché")
 
-# 2. fs/open.c (Ciblage de do_faccessat)
+# 2. fs/open.c
 with open('fs/open.c', 'r') as f: content = f.read()
 if 'ksu_handle_faccessat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n\n"
@@ -138,7 +161,7 @@ if 'ksu_handle_faccessat' not in content:
 else:
     print("✅ fs/open.c déjà patché")
 
-# 3. fs/read_write.c (Ciblage chirurgical + cast)
+# 3. fs/read_write.c
 with open('fs/read_write.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_read' not in content:
     extern = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif\n\n"
@@ -230,6 +253,22 @@ int path_umount(struct path *path, int flags)
     print("✅ fs/namespace.c patché (backport path_umount)")
 else:
     print("✅ fs/namespace.c déjà patché")
+
+# 7. Correctif pour MODULE_IMPORT_NS sur noyau < 5.0
+with open('drivers/kernelsu/core/init.c', 'r') as f: content = f.read()
+if 'MODULE_IMPORT_NS' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)' not in content:
+    old_line = 'MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);'
+    new_block = '''#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif'''
+    if old_line in content:
+        content = content.replace(old_line, new_block)
+        with open('drivers/kernelsu/core/init.c', 'w') as f: f.write(content)
+        print("✅ drivers/kernelsu/core/init.c patché (MODULE_IMPORT_NS conditionnel)")
+    else:
+        print("⚠️  Ligne MODULE_IMPORT_NS non trouvée dans init.c")
+else:
+    print("✅ drivers/kernelsu/core/init.c déjà patché ou non concerné")
 
 PYEOF
 
@@ -402,10 +441,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.0-boot.img
+cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.1-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.0 (SukiSU-Ultra susfs_new) ==="
+echo "=== BUILD TERMINÉ v4.1 (SukiSU-Ultra susfs_new) ==="
 ls -lh output/
