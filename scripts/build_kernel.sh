@@ -521,6 +521,40 @@ else:
 
 print("=== Correctif sulog/event.c terminé ===")
 
+# 18. Correctif pour supercall/dispatch.c (includes manquants pour tasklist_lock, init_task, etc.)
+print("=== Application du correctif pour dispatch.c ===")
+dispatch_path = 'drivers/kernelsu/supercall/dispatch.c'
+with open(dispatch_path, 'r') as f:
+    content = f.read()
+
+# Ajouter les includes nécessaires s'ils ne sont pas déjà présents
+includes_to_add = [
+    '#include <linux/sched.h>',
+    '#include <linux/sched/task.h>',
+    '#include <linux/init_task.h>'
+]
+
+added_any = False
+for inc in includes_to_add:
+    if inc not in content:
+        # Insérer après le dernier #include existant
+        import re
+        match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+        if match:
+            content = content[:match.end()] + inc + '\n' + content[match.end():]
+            print(f"  ✅ Ajout de {inc}")
+            added_any = True
+        else:
+            print(f"  ⚠️  Impossible de trouver le bloc d'includes pour ajouter {inc}")
+
+if added_any:
+    with open(dispatch_path, 'w') as f:
+        f.write(content)
+else:
+    print("  ✅ Tous les includes nécessaires sont déjà présents")
+
+print("=== Correctif dispatch.c terminé ===")
+
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
