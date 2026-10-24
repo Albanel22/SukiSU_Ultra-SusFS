@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # =============================================================================
-# V5.7 : SukiSU-Ultra (susfs-dev) + TAMPER_SYSCALL_TABLE + SUSFS
-#        + Garde vdso_clock_mode (cpu_spoof.c) + backports path_umount/mount
+# V5.8 : SukiSU-Ultra (susfs-dev) intégration manuelle + tous les correctifs 4.19
+#        Branche susfs-dev clonée directement, plus de setup.sh
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra (susfs-dev) pour noyau 4.19 ==="
@@ -28,31 +28,44 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION SukiSU-Ultra (susfs-dev) ====================
-echo "=== Intégration SukiSU-Ultra (susfs-dev avec SUSFS intégré) ==="
+# ==================== 2. INTÉGRATION SukiSU-Ultra (susfs-dev) MANUELLE ====================
+echo "=== Intégration manuelle de SukiSU-Ultra (susfs-dev) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
+# 1. Cloner la branche susfs-dev directement
+git clone --depth=1 --branch susfs-dev https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/ksu-susfs
 
-if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
-    echo "❌ Échec intégration SukiSU-Ultra"; exit 1
+# 2. Vérifier que le dossier kernel existe
+if [ ! -d "/tmp/ksu-susfs/kernel" ]; then
+    echo "❌ Le dossier kernel est introuvable dans susfs-dev"
+    exit 1
 fi
-echo "✅ SukiSU-Ultra (susfs-dev) intégré"
 
-if [ -d "drivers/kernelsu" ]; then
-    KSU_DIR="drivers/kernelsu"
-elif [ -d "KernelSU/kernel" ]; then
-    KSU_DIR="KernelSU/kernel"
-else
-    KSU_DIR="KernelSU"
-fi
-echo "KSU_DIR : $KSU_DIR"
+# 3. Copier le code noyau dans drivers/kernelsu
+mkdir -p drivers/kernelsu
+cp -r /tmp/ksu-susfs/kernel/* drivers/kernelsu/
 
-if find . -name "susfs.h" -path "*/linux/*" 2>/dev/null | grep -q .; then
+# 4. Vérifier que susfs.h est présent
+if find drivers/kernelsu -name "susfs.h" -path "*/linux/*" 2>/dev/null | grep -q .; then
     echo "✅ Fichier susfs.h trouvé"
 else
-    echo "⚠️ susfs.h non trouvé, vérifie la branche"
+    echo "⚠️ susfs.h non trouvé, la compilation pourrait échouer"
 fi
+
+# 5. Intégrer dans le Makefile et Kconfig du noyau
+if ! grep -q "kernelsu" drivers/Makefile; then
+    echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+fi
+if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
+    sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+fi
+
+# 6. Supprimer le dossier temporaire
+rm -rf /tmp/ksu-susfs
+
+echo "✅ SukiSU-Ultra (susfs-dev) intégré manuellement"
+KSU_DIR="drivers/kernelsu"
+echo "KSU_DIR : $KSU_DIR"
 
 # ==================== 2b. NEUTRALISATION CHECK.MK ====================
 echo ""
@@ -353,7 +366,6 @@ for cpu_spoof_path in ['drivers/kernelsu/extension/cpu_spoof.c']:
                 new_block = '''#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
                         (*curr_cs_ptr)->vdso_clock_mode ='''
                 content = content.replace(old_block, new_block)
-                # Fermer le #if juste après la ligne d'assignation
                 content = re.sub(
                     r'(#if LINUX_VERSION_CODE >= KERNEL_VERSION\(5, 7, 0\)\n\s*\(\*curr_cs_ptr\)->vdso_clock_mode\s*=\s*[^;]+;)',
                     r'\1\n#endif',
@@ -363,7 +375,18 @@ for cpu_spoof_path in ['drivers/kernelsu/extension/cpu_spoof.c']:
             return content
         modify_file(cpu_spoof_path, transform_cpu_spoof, f"cpu_spoof.c dans {cpu_spoof_path}")
 
-# 13. Backports path_umount + path_mount
+# 13. sulog/event.c (minmax.h)
+print("=== Correctif sulog/event.c (minmax.h) ===")
+for event_path in ['drivers/kernelsu/sulog/event.c']:
+    if os.path.exists(event_path):
+        def transform_event(content):
+            return content.replace(
+                '#include <linux/minmax.h>',
+                '#include <linux/kernel.h>'
+            )
+        modify_file(event_path, transform_event, f"sulog/event.c dans {event_path}")
+
+# 14. Backports path_umount + path_mount
 print("=== Backport path_umount et path_mount ===")
 namespace_path = 'fs/namespace.c'
 with open(namespace_path, 'r') as f:
@@ -459,7 +482,7 @@ print("=== Correctifs terminés ===")
 
 PYEOF
 
-# ==================== 4. CONFIGURATION (susfs-dev) ====================
+# ==================== 4. CONFIGURATION ====================
 echo ""
 echo "=== Configuration (SukiSU-Ultra susfs-dev + TAMPER_SYSCALL_TABLE) ==="
 export ARCH=arm64; export SUBARCH=arm64
@@ -628,10 +651,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-susfs-dev-v5.7-boot.img
+cp final_boot.img output/SukiSU-Ultra-susfs-dev-v5.8-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v5.7 (SukiSU-Ultra susfs-dev) ==="
+echo "=== BUILD TERMINÉ v5.8 (SukiSU-Ultra susfs-dev) ==="
 ls -lh output/
