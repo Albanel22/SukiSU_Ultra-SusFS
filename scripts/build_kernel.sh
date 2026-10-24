@@ -502,6 +502,25 @@ else:
 
 print("=== Correctif sepolicy.c terminé ===")
 
+# 17. Correctif pour sulog/event.c (remplacement de minmax.h par kernel.h)
+print("=== Application du correctif pour sulog/event.c ===")
+event_path = 'drivers/kernelsu/sulog/event.c'
+with open(event_path, 'r') as f:
+    content = f.read()
+
+if '#include <linux/minmax.h>' in content:
+    content = content.replace(
+        '#include <linux/minmax.h>',
+        '#include <linux/kernel.h>'
+    )
+    with open(event_path, 'w') as f:
+        f.write(content)
+    print("  ✅ Include <linux/minmax.h> remplacé par <linux/kernel.h>")
+else:
+    print("  ✅ Aucun changement nécessaire (include déjà correct ou absent)")
+
+print("=== Correctif sulog/event.c terminé ===")
+
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
