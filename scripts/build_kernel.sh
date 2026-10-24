@@ -555,6 +555,33 @@ else:
 
 print("=== Correctif dispatch.c terminé ===")
 
+# 19. Correctif pour supercall/supercall.c (TWA_RESUME sur noyau < 5.9)
+print("=== Application du correctif pour supercall/supercall.c ===")
+supercall_path = 'drivers/kernelsu/supercall/supercall.c'
+with open(supercall_path, 'r') as f:
+    content = f.read()
+
+# Ajouter une définition de secours pour TWA_RESUME
+if 'TWA_RESUME' in content and '#ifndef TWA_RESUME' not in content:
+    fallback_def = '''
+#ifndef TWA_RESUME
+#define TWA_RESUME 1
+#endif
+'''
+    import re
+    match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+    if match:
+        content = content[:match.end()] + fallback_def + content[match.end():]
+        with open(supercall_path, 'w') as f:
+            f.write(content)
+        print("  ✅ Définition de secours pour TWA_RESUME injectée dans supercall.c")
+    else:
+        print("  ⚠️  Impossible de trouver le bloc d'includes dans supercall.c")
+else:
+    print("  ✅ Déjà patché ou non concerné")
+
+print("=== Correctif supercall.c terminé ===")
+
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
