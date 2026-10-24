@@ -2,8 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V4.3 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
+# V4.4 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
 #        + Fix MODULE_IMPORT_NS + Fix file_wrapper.c (iopoll/remap + unused orig)
+#        + Fix seccomp_cache.c (SECCOMP_ARCH_NATIVE_NR)
+#        + Fix su_mount_ns.c (include mount.h)
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra (susfs_new) pour noyau 4.19 ==="
@@ -315,6 +317,7 @@ if 'struct file *orig = data->orig;' in content:
 with open(file_path, 'w') as f:
     f.write(content)
 print("=== Correctif file_wrapper.c terminé ===")
+
 # 10. Correctif pour seccomp_cache.c (SECCOMP_ARCH_NATIVE_NR sur noyau < 5.9)
 print("=== Application du correctif pour seccomp_cache.c ===")
 seccomp_path = 'drivers/kernelsu/infra/seccomp_cache.c'
@@ -322,7 +325,6 @@ with open(seccomp_path, 'r') as f:
     content = f.read()
 
 if 'SECCOMP_ARCH_NATIVE_NR' not in content or '#ifndef SECCOMP_ARCH_NATIVE_NR' not in content:
-    # Ajouter les définitions de secours au début du fichier, après les includes
     fallback_defs = '''
 #ifndef SECCOMP_ARCH_NATIVE_NR
 #define SECCOMP_ARCH_NATIVE_NR NR_syscalls
@@ -331,8 +333,6 @@ if 'SECCOMP_ARCH_NATIVE_NR' not in content or '#ifndef SECCOMP_ARCH_NATIVE_NR' n
 #define SECCOMP_ARCH_COMPAT_NR NR_syscalls
 #endif
 '''
-    # Trouver la première ligne après les includes pour insérer
-    import re
     match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
     if match:
         content = content[:match.end()] + fallback_defs + content[match.end():]
@@ -345,6 +345,25 @@ else:
     print("  ✅ Définitions déjà présentes ou non nécessaires")
 
 print("=== Correctif seccomp_cache.c terminé ===")
+
+# 11. Correctif pour su_mount_ns.c (chemin d'inclusion mount.h)
+print("=== Application du correctif pour su_mount_ns.c ===")
+mount_ns_path = 'drivers/kernelsu/infra/su_mount_ns.c'
+with open(mount_ns_path, 'r') as f:
+    content = f.read()
+
+if '#include <uapi/linux/mount.h>' in content:
+    content = content.replace(
+        '#include <uapi/linux/mount.h>',
+        '#include <linux/mount.h>'
+    )
+    with open(mount_ns_path, 'w') as f:
+        f.write(content)
+    print("  ✅ Chemin d'inclusion corrigé vers <linux/mount.h>")
+else:
+    print("  ✅ Aucun changement nécessaire (include déjà correct ou absent)")
+
+print("=== Correctif su_mount_ns.c terminé ===")
 
 PYEOF
 
@@ -515,10 +534,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.3-boot.img
+cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.4-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.3 (SukiSU-Ultra susfs_new) ==="
+echo "=== BUILD TERMINÉ v4.4 (SukiSU-Ultra susfs_new) ==="
 ls -lh output/
