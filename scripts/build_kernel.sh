@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V5.4 : SukiSU-Ultra (susfs-dev) + TAMPER_SYSCALL_TABLE + SUSFS intégré
-#        Branche officielle avec SUSFS inclus pour non-GKI
+# V5.5 : SukiSU-Ultra (susfs-main) + TAMPER_SYSCALL_TABLE + SUSFS
+#        + Correctif MODULE_IMPORT_NS (ksu.c) + TWA_RESUME (allowlist.c)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (susfs-dev) pour noyau 4.19 ==="
+echo "=== Build SukiSU-Ultra (susfs-main) pour noyau 4.19 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -28,17 +28,17 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION SukiSU-Ultra (susfs-dev) ====================
-echo "=== Intégration SukiSU-Ultra (susfs-dev avec SUSFS intégré) ==="
+# ==================== 2. INTÉGRATION SukiSU-Ultra (susfs-main) ====================
+echo "=== Intégration SukiSU-Ultra (susfs-main avec SUSFS intégré) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-# Utilisation de la branche susfs-dev qui inclut SUSFS et le support non-GKI
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
+# susfs-main est la branche stable avec SUSFS intégré pour non-GKI
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
     echo "❌ Échec intégration SukiSU-Ultra"; exit 1
 fi
-echo "✅ SukiSU-Ultra (susfs-dev) intégré"
+echo "✅ SukiSU-Ultra (susfs-main) intégré"
 
 if [ -d "drivers/kernelsu" ]; then
     KSU_DIR="drivers/kernelsu"
@@ -50,11 +50,10 @@ fi
 echo "KSU_DIR : $KSU_DIR"
 
 # Vérifier que susfs.h est bien présent
-if [ -f "include/linux/susfs.h" ] || [ -f "drivers/kernelsu/include/linux/susfs.h" ] || find . -name "susfs.h" -path "*/linux/*" | grep -q .; then
+if find . -name "susfs.h" -path "*/linux/*" 2>/dev/null | grep -q .; then
     echo "✅ Fichier susfs.h trouvé"
 else
-    echo "⚠️ susfs.h non trouvé, recherche..."
-    find . -name "susfs.h" 2>/dev/null | head -5
+    echo "⚠️ susfs.h non trouvé, mais la compilation peut continuer"
 fi
 
 # ==================== 2b. NEUTRALISATION CHECK.MK ====================
@@ -115,13 +114,33 @@ echo "=== Static exports SELinux ==="
     sed -i 's/^static struct security_operations selinux_ops/struct security_operations selinux_ops/' security/selinux/hooks.c
 }
 
-# ==================== 3. STUB STATIC_CALL + BACKPORTS ====================
+# ==================== 3. STUB STATIC_CALL + CORRECTIFS CIBLÉS ====================
 echo ""
-echo "=== Application du stub static_call.h et backports ==="
+echo "=== Application du stub static_call.h et des correctifs ciblés ==="
 
 python3 << 'PYEOF'
 import re
 import os
+
+def modify_file(path, transform_func, description):
+    if not os.path.exists(path):
+        print(f"  ⚠️  {description} : fichier {path} introuvable, ignoré")
+        return False
+    try:
+        with open(path, 'r') as f:
+            content = f.read()
+        new_content = transform_func(content)
+        if new_content != content:
+            with open(path, 'w') as f:
+                f.write(new_content)
+            print(f"  ✅ {description}")
+            return True
+        else:
+            print(f"  ✅ {description} (déjà patché)")
+            return False
+    except Exception as e:
+        print(f"  ⚠️  {description} : erreur {e}")
+        return False
 
 # 1. Stub static_call.h (indispensable pour < 5.10)
 print("=== Stub static_call.h ===")
@@ -144,7 +163,51 @@ if not os.path.exists(static_call_h_path):
 else:
     print("  ✅ include/linux/static_call.h existe déjà")
 
-# 2. Backport path_umount et path_mount
+# 2. Correctif MODULE_IMPORT_NS dans ksu.c (confirmé par le rapport de bug)
+print("=== Correctif MODULE_IMPORT_NS ===")
+ksu_c_paths = [
+    'drivers/kernelsu/ksu.c',
+    'drivers/kernelsu/ksu_main.c',
+    'drivers/kernelsu/core/init.c',
+]
+for ksu_c_path in ksu_c_paths:
+    if os.path.exists(ksu_c_path):
+        def transform_import_ns(content):
+            if 'MODULE_IMPORT_NS' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)' not in content:
+                old_line = 'MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);'
+                new_block = '''#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif'''
+                return content.replace(old_line, new_block)
+            return content
+        modify_file(ksu_c_path, transform_import_ns, f"MODULE_IMPORT_NS dans {ksu_c_path}")
+
+# 3. Correctif TWA_RESUME et put_task_struct dans allowlist.c
+print("=== Correctif allowlist.c ===")
+allowlist_paths = [
+    'drivers/kernelsu/policy/allowlist.c',
+    'drivers/kernelsu/allowlist.c',
+]
+for allowlist_path in allowlist_paths:
+    if os.path.exists(allowlist_path):
+        def transform_allowlist(content):
+            if 'TWA_RESUME' in content and '#ifndef TWA_RESUME' not in content:
+                fallback_def = '''
+#ifndef TWA_RESUME
+#define TWA_RESUME 1
+#endif
+'''
+                match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+                if match:
+                    content = content[:match.end()] + fallback_def + content[match.end():]
+            if '#include <linux/sched/task.h>' not in content:
+                match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+                if match:
+                    content = content[:match.end()] + '#include <linux/sched/task.h>\n' + content[match.end():]
+            return content
+        modify_file(allowlist_path, transform_allowlist, f"allowlist.c dans {allowlist_path}")
+
+# 4. Backport path_umount et path_mount
 print("=== Backport path_umount et path_mount ===")
 namespace_path = 'fs/namespace.c'
 with open(namespace_path, 'r') as f:
@@ -236,13 +299,13 @@ out_free:
 
 with open(namespace_path, 'w') as f:
     f.write(content)
-print("=== Backports terminés ===")
+print("=== Correctifs terminés ===")
 
 PYEOF
 
-# ==================== 4. CONFIGURATION (susfs-dev) ====================
+# ==================== 4. CONFIGURATION (susfs-main) ====================
 echo ""
-echo "=== Configuration (SukiSU-Ultra susfs-dev + TAMPER_SYSCALL_TABLE) ==="
+echo "=== Configuration (SukiSU-Ultra susfs-main + TAMPER_SYSCALL_TABLE) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -255,7 +318,6 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
   echo "CONFIG_KSU_LSM_SECURITY_HOOKS=y"
   echo "CONFIG_KSU_FEATURE_SULOG=y"
   echo "CONFIG_KSU_FEATURE_ADBROOT=y"
-  # SUSFS (déjà intégré dans susfs-dev)
   echo "CONFIG_KSU_SUSFS=y"
   echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
   echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
@@ -265,7 +327,6 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
   echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
   echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
   echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
-  # Requis pour non-GKI
   echo "CONFIG_KALLSYMS=y"
   echo "CONFIG_KALLSYMS_ALL=y"
   echo "CONFIG_KPROBES=y"
@@ -306,9 +367,9 @@ else
     exit 1
 fi
 
-# ==================== 7. COMPILATION KSUD (susfs-dev) ====================
+# ==================== 7. COMPILATION KSUD (susfs-main) ====================
 echo ""
-echo "=== Compilation ksud (SukiSU-Ultra susfs-dev) ==="
+echo "=== Compilation ksud (SukiSU-Ultra susfs-main) ==="
 cd "$GITHUB_WORKSPACE"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
@@ -321,7 +382,7 @@ export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-git clone --depth=1 --branch susfs-dev https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 --branch susfs-main https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
@@ -411,10 +472,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-susfs-dev-v5.4-boot.img
+cp final_boot.img output/SukiSU-Ultra-susfs-main-v5.5-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v5.4 (SukiSU-Ultra susfs-dev) ==="
+echo "=== BUILD TERMINÉ v5.5 (SukiSU-Ultra susfs-main) ==="
 ls -lh output/
