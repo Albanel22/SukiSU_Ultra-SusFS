@@ -474,6 +474,34 @@ else:
 
 print("=== Correctif rules.c terminé ===")
 
+# 16. Correctif pour sepolicy.c (jailbreak feature désactivée sur noyau < 5.10)
+print("=== Application du correctif pour sepolicy.c ===")
+sepolicy_path = 'drivers/kernelsu/selinux/sepolicy.c'
+with open(sepolicy_path, 'r') as f:
+    content = f.read()
+
+# Encadrer tout le fichier avec une garde de version
+# Sur les noyaux < 5.10, on désactive complètement la compilation de ce fichier
+if '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)' not in content:
+    lines = content.split('\n')
+    insert_pos = 0
+    for i, line in enumerate(lines):
+        if line.strip() and not line.strip().startswith('//') and not line.strip().startswith('/*') and not line.strip().startswith('*') and not line.strip().startswith('#include'):
+            insert_pos = i
+            break
+    
+    lines.insert(insert_pos, '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)')
+    lines.append('#endif // LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)')
+    
+    content = '\n'.join(lines)
+    with open(sepolicy_path, 'w') as f:
+        f.write(content)
+    print("  ✅ sepolicy.c désactivé sur noyau < 5.10 (jailbreak feature)")
+else:
+    print("  ✅ Déjà patché ou non concerné")
+
+print("=== Correctif sepolicy.c terminé ===")
+
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
