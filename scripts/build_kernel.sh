@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # =============================================================================
-# V4.2 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
-#        + Fix MODULE_IMPORT_NS + Fix file_wrapper.c (iopoll/remap_file_range)
+# V4.3 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
+#        + Fix MODULE_IMPORT_NS + Fix file_wrapper.c (iopoll/remap + unused orig)
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra (susfs_new) pour noyau 4.19 ==="
@@ -268,7 +268,7 @@ MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 else:
     print("✅ drivers/kernelsu/core/init.c déjà patché ou non concerné")
 
-# 8. Correctif pour file_wrapper.c sur noyau 4.19
+# 8. Correctif pour file_wrapper.c sur noyau 4.19 (iopoll & remap_file_range)
 print("=== Application du correctif pour file_wrapper.c ===")
 file_path = 'drivers/kernelsu/infra/file_wrapper.c'
 with open(file_path, 'r') as f:
@@ -303,6 +303,14 @@ if 'remap_file_range' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4
         '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n#endif'
     )
     print("  ✅ remap_file_range conditionnel ajouté")
+
+# 9. Correctif pour les variables 'orig' inutilisées (conséquence du correctif 8)
+if 'struct file *orig = data->orig;' in content:
+    content = content.replace(
+        'struct file *orig = data->orig;',
+        'struct file *orig __maybe_unused = data->orig;'
+    )
+    print("  ✅ Variables 'orig' marquées comme __maybe_unused")
 
 with open(file_path, 'w') as f:
     f.write(content)
@@ -477,10 +485,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.2-boot.img
+cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.3-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.2 (SukiSU-Ultra susfs_new) ==="
+echo "=== BUILD TERMINÉ v4.3 (SukiSU-Ultra susfs_new) ==="
 ls -lh output/
