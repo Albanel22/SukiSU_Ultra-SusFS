@@ -2,9 +2,8 @@
 set -euo pipefail
 
 # =============================================================================
-# V4.1 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
-#        + Fix MODULE_IMPORT_NS pour noyau 4.19
-# Testé pour noyau 4.19 - Motorola One 5G Ace (kiev)
+# V4.2 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
+#        + Fix MODULE_IMPORT_NS + Fix file_wrapper.c (iopoll/remap_file_range)
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra (susfs_new) pour noyau 4.19 ==="
@@ -33,7 +32,6 @@ git log --oneline -1
 echo "=== Intégration SukiSU-Ultra (susfs_new) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-# Utilisation du script d'intégration officiel avec la branche susfs_new
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs_new/kernel/setup.sh" | bash -s susfs_new
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
@@ -270,6 +268,46 @@ MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 else:
     print("✅ drivers/kernelsu/core/init.c déjà patché ou non concerné")
 
+# 8. Correctif pour file_wrapper.c sur noyau 4.19
+print("=== Application du correctif pour file_wrapper.c ===")
+file_path = 'drivers/kernelsu/infra/file_wrapper.c'
+with open(file_path, 'r') as f:
+    content = f.read()
+
+if 'iopoll' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)' not in content:
+    content = content.replace(
+        'return orig->f_op->iopoll(kiocb, spin);',
+        '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n        return orig->f_op->iopoll(kiocb, spin);\n#else\n        return -EOPNOTSUPP;\n#endif'
+    )
+    content = content.replace(
+        'p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;',
+        '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\n#endif'
+    )
+    print("  ✅ iopoll conditionnel ajouté")
+
+if 'remap_file_range' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)' not in content:
+    content = content.replace(
+        'if (remap_flags & REMAP_FILE_DEDUP) {',
+        '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n    if (remap_flags & REMAP_FILE_DEDUP) {\n#else\n    if (0) {\n#endif'
+    )
+    content = content.replace(
+        'return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);',
+        '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n        return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif'
+    )
+    content = content.replace(
+        'return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);',
+        '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n        return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif'
+    )
+    content = content.replace(
+        'p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;',
+        '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n#endif'
+    )
+    print("  ✅ remap_file_range conditionnel ajouté")
+
+with open(file_path, 'w') as f:
+    f.write(content)
+print("=== Correctif file_wrapper.c terminé ===")
+
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
@@ -285,7 +323,6 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
   echo "CONFIG_KSU=y"
   echo "CONFIG_KSU_MANUAL_HOOK=y"
   echo "# CONFIG_KSU_WITH_KPROBES is not set"
-  # SUSFS est déjà intégré dans la branche susfs_new, on active les options
   echo "CONFIG_KSU_SUSFS=y"
   echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
   echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
@@ -295,7 +332,6 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
   echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
   echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
   echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
-  # Requis pour les noyaux non-GKI
   echo "CONFIG_KALLSYMS=y"
   echo "CONFIG_KALLSYMS_ALL=y"
   echo "CONFIG_KPROBES=y"
@@ -441,10 +477,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.1-boot.img
+cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.2-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.1 (SukiSU-Ultra susfs_new) ==="
+echo "=== BUILD TERMINÉ v4.2 (SukiSU-Ultra susfs_new) ==="
 ls -lh output/
