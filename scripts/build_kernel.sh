@@ -2,10 +2,8 @@
 set -euo pipefail
 
 # =============================================================================
-# V4.4 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
-#        + Fix MODULE_IMPORT_NS + Fix file_wrapper.c (iopoll/remap + unused orig)
-#        + Fix seccomp_cache.c (SECCOMP_ARCH_NATIVE_NR)
-#        + Fix su_mount_ns.c (include mount.h)
+# V4.5 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
+#        + TOUS les correctifs de compatibilité pour noyau 4.19
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra (susfs_new) pour noyau 4.19 ==="
@@ -130,9 +128,9 @@ if [ -n "$FILES_ANON_INODE" ]; then
     done
 fi
 
-# ==================== 3. PATCHS MANUELS SukiSU-Ultra ====================
+# ==================== 3. PATCHS MANUELS ET CORRECTIFS ====================
 echo ""
-echo "=== Application des patchs manuels SukiSU-Ultra ==="
+echo "=== Application des patchs manuels et correctifs SukiSU-Ultra ==="
 
 python3 << 'PYEOF'
 import re
@@ -157,7 +155,7 @@ if 'ksu_handle_faccessat' not in content:
     call = "#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\t"
     content = re.sub(r'(\tif\s*\(mode\s*&\s*~S_IRWXO\))', call + r'\1', content, count=1)
     with open('fs/open.c', 'w') as f: f.write(content)
-    print("✅ fs/open.c patché (via do_faccessat)")
+    print("✅ fs/open.c patché")
 else:
     print("✅ fs/open.c déjà patché")
 
@@ -175,9 +173,9 @@ if 'ksu_handle_sys_read' not in content:
             insert_pos = ret_pos + len('ssize_t ret = -EBADF;')
             content = content[:insert_pos] + call + content[insert_pos:]
             with open('fs/read_write.c', 'w') as f: f.write(content)
-            print("✅ fs/read_write.c patché (chirurgical + cast)")
+            print("✅ fs/read_write.c patché")
         else:
-            print("❌ Impossible de trouver 'ssize_t ret = -EBADF;' dans read")
+            print("❌ Impossible de trouver 'ssize_t ret = -EBADF;'")
     else:
         print("❌ Impossible de trouver 'SYSCALL_DEFINE3(read,'")
 else:
@@ -207,7 +205,7 @@ if 'ksu_handle_sys_reboot' not in content:
 else:
     print("✅ kernel/reboot.c déjà patché")
 
-# 6. fs/namespace.c (Backport de path_umount depuis Linux 5.9)
+# 6. fs/namespace.c (Backport de path_umount)
 with open('fs/namespace.c', 'r') as f: content = f.read()
 if 'int path_umount(struct path *path, int flags)' not in content:
     backport = '''
@@ -224,7 +222,7 @@ static int can_umount(const struct path *path, int flags)
 		return -EINVAL;
 	if (!check_mnt(mnt))
 		return -EINVAL;
-	if (mnt->mnt.mnt_flags & MNT_LOCKED) /* Check optimistically */
+	if (mnt->mnt.mnt_flags & MNT_LOCKED)
 		return -EINVAL;
 	if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -240,7 +238,6 @@ int path_umount(struct path *path, int flags)
 	if (!ret)
 		ret = do_umount(mnt, flags);
 
-	/* we must not call path_put() as that would clear mnt_expiry_mark */
 	dput(path->dentry);
 	mntput_no_expire(mnt);
 	return ret;
@@ -250,11 +247,11 @@ int path_umount(struct path *path, int flags)
 '''
     content = re.sub(r'(int ksys_umount\(char __user \*name, int flags\))', backport + r'\1', content, count=1)
     with open('fs/namespace.c', 'w') as f: f.write(content)
-    print("✅ fs/namespace.c patché (backport path_umount)")
+    print("✅ fs/namespace.c patché")
 else:
     print("✅ fs/namespace.c déjà patché")
 
-# 7. Correctif pour MODULE_IMPORT_NS sur noyau < 5.0
+# 7. Correctif MODULE_IMPORT_NS
 with open('drivers/kernelsu/core/init.c', 'r') as f: content = f.read()
 if 'MODULE_IMPORT_NS' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)' not in content:
     old_line = 'MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);'
@@ -264,14 +261,14 @@ MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
     if old_line in content:
         content = content.replace(old_line, new_block)
         with open('drivers/kernelsu/core/init.c', 'w') as f: f.write(content)
-        print("✅ drivers/kernelsu/core/init.c patché (MODULE_IMPORT_NS conditionnel)")
+        print("✅ init.c patché (MODULE_IMPORT_NS)")
     else:
-        print("⚠️  Ligne MODULE_IMPORT_NS non trouvée dans init.c")
+        print("⚠️ Ligne MODULE_IMPORT_NS non trouvée dans init.c")
 else:
-    print("✅ drivers/kernelsu/core/init.c déjà patché ou non concerné")
+    print("✅ init.c déjà patché")
 
-# 8. Correctif pour file_wrapper.c sur noyau 4.19 (iopoll & remap_file_range)
-print("=== Application du correctif pour file_wrapper.c ===")
+# 8. Correctif file_wrapper.c
+print("=== Correctif file_wrapper.c ===")
 file_path = 'drivers/kernelsu/infra/file_wrapper.c'
 with open(file_path, 'r') as f:
     content = f.read()
@@ -285,7 +282,7 @@ if 'iopoll' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)' n
         'p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;',
         '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\n#endif'
     )
-    print("  ✅ iopoll conditionnel ajouté")
+    print("  ✅ iopoll conditionnel")
 
 if 'remap_file_range' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)' not in content:
     content = content.replace(
@@ -304,22 +301,21 @@ if 'remap_file_range' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4
         'p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;',
         '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n#endif'
     )
-    print("  ✅ remap_file_range conditionnel ajouté")
+    print("  ✅ remap_file_range conditionnel")
 
-# 9. Correctif pour les variables 'orig' inutilisées (conséquence du correctif 8)
 if 'struct file *orig = data->orig;' in content:
     content = content.replace(
         'struct file *orig = data->orig;',
         'struct file *orig __maybe_unused = data->orig;'
     )
-    print("  ✅ Variables 'orig' marquées comme __maybe_unused")
+    print("  ✅ orig __maybe_unused")
 
 with open(file_path, 'w') as f:
     f.write(content)
 print("=== Correctif file_wrapper.c terminé ===")
 
-# 10. Correctif pour seccomp_cache.c (SECCOMP_ARCH_NATIVE_NR sur noyau < 5.9)
-print("=== Application du correctif pour seccomp_cache.c ===")
+# 9. Correctif seccomp_cache.c
+print("=== Correctif seccomp_cache.c ===")
 seccomp_path = 'drivers/kernelsu/infra/seccomp_cache.c'
 with open(seccomp_path, 'r') as f:
     content = f.read()
@@ -338,16 +334,16 @@ if 'SECCOMP_ARCH_NATIVE_NR' not in content or '#ifndef SECCOMP_ARCH_NATIVE_NR' n
         content = content[:match.end()] + fallback_defs + content[match.end():]
         with open(seccomp_path, 'w') as f:
             f.write(content)
-        print("  ✅ Définitions de secours pour SECCOMP_ARCH_NATIVE_NR injectées")
+        print("  ✅ Définitions de secours SECCOMP_ARCH_NATIVE_NR")
     else:
-        print("  ⚠️  Impossible de trouver le bloc d'includes dans seccomp_cache.c")
+        print("  ⚠️ Impossible de trouver le bloc d'includes")
 else:
-    print("  ✅ Définitions déjà présentes ou non nécessaires")
+    print("  ✅ Déjà présent")
 
 print("=== Correctif seccomp_cache.c terminé ===")
 
-# 11. Correctif pour su_mount_ns.c (chemin d'inclusion mount.h)
-print("=== Application du correctif pour su_mount_ns.c ===")
+# 10. Correctif su_mount_ns.c
+print("=== Correctif su_mount_ns.c ===")
 mount_ns_path = 'drivers/kernelsu/infra/su_mount_ns.c'
 with open(mount_ns_path, 'r') as f:
     content = f.read()
@@ -359,21 +355,19 @@ if '#include <uapi/linux/mount.h>' in content:
     )
     with open(mount_ns_path, 'w') as f:
         f.write(content)
-    print("  ✅ Chemin d'inclusion corrigé vers <linux/mount.h>")
+    print("  ✅ Chemin d'inclusion corrigé")
 else:
-    print("  ✅ Aucun changement nécessaire (include déjà correct ou absent)")
+    print("  ✅ Aucun changement nécessaire")
 
 print("=== Correctif su_mount_ns.c terminé ===")
 
-# 12. Correctif pour pkg_observer.c (désactivation sur noyau < 5.9)
-print("=== Application du correctif pour pkg_observer.c ===")
+# 11. Correctif pkg_observer.c
+print("=== Correctif pkg_observer.c ===")
 pkg_observer_path = 'drivers/kernelsu/manager/pkg_observer.c'
 with open(pkg_observer_path, 'r') as f:
     content = f.read()
 
-# Encadrer l'assignation de handle_inode_event avec une garde de version
 if '.handle_inode_event = ksu_handle_inode_event,' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' not in content:
-    # Version avec indentation simple
     content = content.replace(
         '.handle_inode_event = ksu_handle_inode_event,',
         '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n\t.handle_inode_event = ksu_handle_inode_event,\n#endif'
@@ -386,48 +380,39 @@ else:
 
 print("=== Correctif pkg_observer.c terminé ===")
 
-# 13. Correctif pour allowlist.c (TWA_RESUME et put_task_struct sur noyau < 5.9)
-print("=== Application du correctif pour allowlist.c ===")
+# 12. Correctif allowlist.c
+print("=== Correctif allowlist.c ===")
 allowlist_path = 'drivers/kernelsu/policy/allowlist.c'
 with open(allowlist_path, 'r') as f:
     content = f.read()
 
-# 1. Ajouter une définition de secours pour TWA_RESUME
 if 'TWA_RESUME' in content and '#ifndef TWA_RESUME' not in content:
     fallback_def = '''
 #ifndef TWA_RESUME
 #define TWA_RESUME 1
 #endif
 '''
-    # Insérer après les includes
     match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
     if match:
         content = content[:match.end()] + fallback_def + content[match.end():]
-        print("  ✅ Définition de secours pour TWA_RESUME injectée")
-    else:
-        print("  ⚠️  Impossible de trouver le bloc d'includes dans allowlist.c")
+        print("  ✅ Définition de secours TWA_RESUME")
 
-# 2. Ajouter l'include pour put_task_struct
 if '#include <linux/sched/task.h>' not in content:
-    # Ajouter après les autres includes
     match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
     if match:
         content = content[:match.end()] + '#include <linux/sched/task.h>\n' + content[match.end():]
-        print("  ✅ Include <linux/sched/task.h> ajouté pour put_task_struct")
-    else:
-        print("  ⚠️  Impossible de trouver le bloc d'includes dans allowlist.c")
+        print("  ✅ Include <linux/sched/task.h> ajouté")
 
 with open(allowlist_path, 'w') as f:
     f.write(content)
 print("=== Correctif allowlist.c terminé ===")
 
-# 14. Correctif pour app_profile.c (filter_count sur noyau < 5.9)
-print("=== Application du correctif pour app_profile.c ===")
+# 13. Correctif app_profile.c
+print("=== Correctif app_profile.c ===")
 app_profile_path = 'drivers/kernelsu/policy/app_profile.c'
 with open(app_profile_path, 'r') as f:
     content = f.read()
 
-# Encadrer l'utilisation de filter_count avec une garde de version
 old_line = 'atomic_set(&current->seccomp.filter_count, 0);'
 new_block = '''#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	atomic_set(&current->seccomp.filter_count, 0);
@@ -437,51 +422,42 @@ if old_line in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' n
     content = content.replace(old_line, new_block)
     with open(app_profile_path, 'w') as f:
         f.write(content)
-    print("  ✅ filter_count conditionnel ajouté (ignoré sur noyau < 5.9)")
+    print("  ✅ filter_count conditionnel")
 else:
     print("  ✅ Déjà patché ou non concerné")
 
 print("=== Correctif app_profile.c terminé ===")
 
-# 15. Correctif pour rules.c (selinux_state.policy sur noyau < 5.7)
-print("=== Application du correctif pour rules.c ===")
+# 14. Correctif rules.c
+print("=== Correctif rules.c ===")
 rules_path = 'drivers/kernelsu/selinux/rules.c'
 with open(rules_path, 'r') as f:
     content = f.read()
 
-# Encadrer tout le fichier avec une garde de version
-# Sur les noyaux < 5.7, on désactive complètement la compilation de ce fichier
 if '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)' not in content:
-    # Trouver la première ligne non-commentaire après les includes
     lines = content.split('\n')
     insert_pos = 0
     for i, line in enumerate(lines):
         if line.strip() and not line.strip().startswith('//') and not line.strip().startswith('/*') and not line.strip().startswith('*') and not line.strip().startswith('#include'):
             insert_pos = i
             break
-    
-    # Insérer la garde au début du code
     lines.insert(insert_pos, '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)')
-    # Ajouter le #endif à la fin
     lines.append('#endif // LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)')
-    
     content = '\n'.join(lines)
     with open(rules_path, 'w') as f:
         f.write(content)
-    print("  ✅ rules.c désactivé sur noyau < 5.7 (selinux_state.policy inexistant)")
+    print("  ✅ rules.c désactivé sur noyau < 5.7")
 else:
-    print("  ✅ Déjà patché ou non concerné")
+    print("  ✅ Déjà patché")
 
 print("=== Correctif rules.c terminé ===")
 
-# 16. Correctif pour sepolicy.c (jailbreak feature désactivée sur noyau < 5.10)
-print("=== Application du correctif pour sepolicy.c ===")
+# 15. Correctif sepolicy.c
+print("=== Correctif sepolicy.c ===")
 sepolicy_path = 'drivers/kernelsu/selinux/sepolicy.c'
 with open(sepolicy_path, 'r') as f:
     content = f.read()
 
-# Encadrer tout le fichier avec une garde de version
-# Sur les noyaux < 5.10, on désactive complètement la compilation de ce fichier
 if '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)' not in content:
     lines = content.split('\n')
     insert_pos = 0
@@ -489,21 +465,19 @@ if '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)' not in content:
         if line.strip() and not line.strip().startswith('//') and not line.strip().startswith('/*') and not line.strip().startswith('*') and not line.strip().startswith('#include'):
             insert_pos = i
             break
-    
     lines.insert(insert_pos, '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)')
     lines.append('#endif // LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)')
-    
     content = '\n'.join(lines)
     with open(sepolicy_path, 'w') as f:
         f.write(content)
-    print("  ✅ sepolicy.c désactivé sur noyau < 5.10 (jailbreak feature)")
+    print("  ✅ sepolicy.c désactivé sur noyau < 5.10")
 else:
-    print("  ✅ Déjà patché ou non concerné")
+    print("  ✅ Déjà patché")
 
 print("=== Correctif sepolicy.c terminé ===")
 
-# 17. Correctif pour sulog/event.c (remplacement de minmax.h par kernel.h)
-print("=== Application du correctif pour sulog/event.c ===")
+# 16. Correctif sulog/event.c
+print("=== Correctif sulog/event.c ===")
 event_path = 'drivers/kernelsu/sulog/event.c'
 with open(event_path, 'r') as f:
     content = f.read()
@@ -515,19 +489,18 @@ if '#include <linux/minmax.h>' in content:
     )
     with open(event_path, 'w') as f:
         f.write(content)
-    print("  ✅ Include <linux/minmax.h> remplacé par <linux/kernel.h>")
+    print("  ✅ minmax.h remplacé par kernel.h")
 else:
-    print("  ✅ Aucun changement nécessaire (include déjà correct ou absent)")
+    print("  ✅ Aucun changement nécessaire")
 
 print("=== Correctif sulog/event.c terminé ===")
 
-# 18. Correctif pour supercall/dispatch.c (includes manquants pour tasklist_lock, init_task, etc.)
-print("=== Application du correctif pour dispatch.c ===")
+# 17. Correctif supercall/dispatch.c
+print("=== Correctif supercall/dispatch.c ===")
 dispatch_path = 'drivers/kernelsu/supercall/dispatch.c'
 with open(dispatch_path, 'r') as f:
     content = f.read()
 
-# Ajouter les includes nécessaires s'ils ne sont pas déjà présents
 includes_to_add = [
     '#include <linux/sched.h>',
     '#include <linux/sched/task.h>',
@@ -537,50 +510,68 @@ includes_to_add = [
 added_any = False
 for inc in includes_to_add:
     if inc not in content:
-        # Insérer après le dernier #include existant
-        import re
         match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
         if match:
             content = content[:match.end()] + inc + '\n' + content[match.end():]
             print(f"  ✅ Ajout de {inc}")
             added_any = True
-        else:
-            print(f"  ⚠️  Impossible de trouver le bloc d'includes pour ajouter {inc}")
 
 if added_any:
     with open(dispatch_path, 'w') as f:
         f.write(content)
 else:
-    print("  ✅ Tous les includes nécessaires sont déjà présents")
+    print("  ✅ Tous les includes déjà présents")
 
-print("=== Correctif dispatch.c terminé ===")
+print("=== Correctif supercall/dispatch.c terminé ===")
 
-# 19. Correctif pour supercall/supercall.c (TWA_RESUME sur noyau < 5.9)
-print("=== Application du correctif pour supercall/supercall.c ===")
+# 18. Correctif supercall/supercall.c
+print("=== Correctif supercall/supercall.c ===")
 supercall_path = 'drivers/kernelsu/supercall/supercall.c'
 with open(supercall_path, 'r') as f:
     content = f.read()
 
-# Ajouter une définition de secours pour TWA_RESUME
 if 'TWA_RESUME' in content and '#ifndef TWA_RESUME' not in content:
     fallback_def = '''
 #ifndef TWA_RESUME
 #define TWA_RESUME 1
 #endif
 '''
-    import re
     match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
     if match:
         content = content[:match.end()] + fallback_def + content[match.end():]
         with open(supercall_path, 'w') as f:
             f.write(content)
-        print("  ✅ Définition de secours pour TWA_RESUME injectée dans supercall.c")
+        print("  ✅ Définition de secours TWA_RESUME")
     else:
-        print("  ⚠️  Impossible de trouver le bloc d'includes dans supercall.c")
+        print("  ⚠️ Impossible de trouver le bloc d'includes")
 else:
     print("  ✅ Déjà patché ou non concerné")
 
-print("=== Correctif supercall.c terminé ===")
+print("=== Correctif supercall/supercall.c terminé ===")
+
+# 19. Correctif selinux_hide.c (désactivation sur noyau < 5.10) - NOUVEAU
+print("=== Correctif selinux_hide.c ===")
+selinux_hide_path = 'drivers/kernelsu/feature/selinux_hide.c'
+with open(selinux_hide_path, 'r') as f:
+    content = f.read()
+
+if '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)' not in content:
+    lines = content.split('\n')
+    insert_pos = 0
+    for i, line in enumerate(lines):
+        if line.strip() and not line.strip().startswith('//') and not line.strip().startswith('/*') and not line.strip().startswith('*') and not line.strip().startswith('#include'):
+            insert_pos = i
+            break
+    lines.insert(insert_pos, '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)')
+    lines.append('#endif // LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)')
+    content = '\n'.join(lines)
+    with open(selinux_hide_path, 'w') as f:
+        f.write(content)
+    print("  ✅ selinux_hide.c désactivé sur noyau < 5.10")
+else:
+    print("  ✅ Déjà patché")
+
+print("=== Correctif selinux_hide.c terminé ===")
 
 PYEOF
 
@@ -646,7 +637,7 @@ else
     exit 1
 fi
 
-# ==================== 7. COMPILATION KSUD (depuis susfs_new) ====================
+# ==================== 7. COMPILATION KSUD ====================
 echo ""
 echo "=== Compilation ksud (SukiSU-Ultra susfs_new) ==="
 cd "$GITHUB_WORKSPACE"
@@ -678,12 +669,12 @@ cargo +nightly build --release --target aarch64-linux-android
 KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1 || true)
 if [ -z "$KSUD_BINARY" ]; then echo "❌ ksud introuvable"; exit 1; fi
 cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
-echo "✅ ksud compilé (SukiSU-Ultra susfs_new)"
+echo "✅ ksud compilé"
 cd "$GITHUB_WORKSPACE"
 
-# ==================== 8. REPACK (MÉTHODE BACKSLASHXX) ====================
+# ==================== 8. REPACK ====================
 echo ""
-echo "=== Repack (méthode backslashxx : magiskboot cpio add) ==="
+echo "=== Repack (méthode backslashxx) ==="
 
 rm -f ./boot-stock.img 2>/dev/null || true
 if gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img 2>&1; then
@@ -751,10 +742,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.4-boot.img
+cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.5-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.4 (SukiSU-Ultra susfs_new) ==="
+echo "=== BUILD TERMINÉ v4.5 (SukiSU-Ultra susfs_new) ==="
 ls -lh output/
