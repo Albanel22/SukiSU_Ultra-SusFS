@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V5.3 : SukiSU-Ultra (builtin) + TAMPER_SYSCALL_TABLE + SUSFS
-#        Script épuré : Stub static_call.h + Backport path_umount/path_mount
+# V5.4 : SukiSU-Ultra (susfs-dev) + TAMPER_SYSCALL_TABLE + SUSFS intégré
+#        Branche officielle avec SUSFS inclus pour non-GKI
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (builtin) pour noyau 4.19 ==="
+echo "=== Build SukiSU-Ultra (susfs-dev) pour noyau 4.19 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -28,17 +28,17 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION SukiSU-Ultra (builtin) ====================
-echo "=== Intégration SukiSU-Ultra (builtin) ==="
+# ==================== 2. INTÉGRATION SukiSU-Ultra (susfs-dev) ====================
+echo "=== Intégration SukiSU-Ultra (susfs-dev avec SUSFS intégré) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-# Utilisation de la branche officielle 'builtin'
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+# Utilisation de la branche susfs-dev qui inclut SUSFS et le support non-GKI
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
     echo "❌ Échec intégration SukiSU-Ultra"; exit 1
 fi
-echo "✅ SukiSU-Ultra (builtin) intégré"
+echo "✅ SukiSU-Ultra (susfs-dev) intégré"
 
 if [ -d "drivers/kernelsu" ]; then
     KSU_DIR="drivers/kernelsu"
@@ -48,6 +48,14 @@ else
     KSU_DIR="KernelSU"
 fi
 echo "KSU_DIR : $KSU_DIR"
+
+# Vérifier que susfs.h est bien présent
+if [ -f "include/linux/susfs.h" ] || [ -f "drivers/kernelsu/include/linux/susfs.h" ] || find . -name "susfs.h" -path "*/linux/*" | grep -q .; then
+    echo "✅ Fichier susfs.h trouvé"
+else
+    echo "⚠️ susfs.h non trouvé, recherche..."
+    find . -name "susfs.h" 2>/dev/null | head -5
+fi
 
 # ==================== 2b. NEUTRALISATION CHECK.MK ====================
 echo ""
@@ -107,9 +115,9 @@ echo "=== Static exports SELinux ==="
     sed -i 's/^static struct security_operations selinux_ops/struct security_operations selinux_ops/' security/selinux/hooks.c
 }
 
-# ==================== 3. BACKPORTS MINIMAUX ET STUB HEADER ====================
+# ==================== 3. STUB STATIC_CALL + BACKPORTS ====================
 echo ""
-echo "=== Application des backports minimaux ==="
+echo "=== Application du stub static_call.h et backports ==="
 
 python3 << 'PYEOF'
 import re
@@ -232,9 +240,9 @@ print("=== Backports terminés ===")
 
 PYEOF
 
-# ==================== 4. CONFIGURATION (voie officielle builtin) ====================
+# ==================== 4. CONFIGURATION (susfs-dev) ====================
 echo ""
-echo "=== Configuration (SukiSU-Ultra builtin + TAMPER_SYSCALL_TABLE) ==="
+echo "=== Configuration (SukiSU-Ultra susfs-dev + TAMPER_SYSCALL_TABLE) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -242,13 +250,12 @@ mkdir -p out
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
 
 {
-  # Configuration officielle pour noyau non-GKI ARM64
   echo "CONFIG_KSU=y"
   echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y"
   echo "CONFIG_KSU_LSM_SECURITY_HOOKS=y"
   echo "CONFIG_KSU_FEATURE_SULOG=y"
   echo "CONFIG_KSU_FEATURE_ADBROOT=y"
-  # SUSFS (inclus dans builtin)
+  # SUSFS (déjà intégré dans susfs-dev)
   echo "CONFIG_KSU_SUSFS=y"
   echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
   echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
@@ -258,7 +265,7 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
   echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
   echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
   echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
-  # Requis pour les noyaux non-GKI
+  # Requis pour non-GKI
   echo "CONFIG_KALLSYMS=y"
   echo "CONFIG_KALLSYMS_ALL=y"
   echo "CONFIG_KPROBES=y"
@@ -299,9 +306,9 @@ else
     exit 1
 fi
 
-# ==================== 7. COMPILATION KSUD ====================
+# ==================== 7. COMPILATION KSUD (susfs-dev) ====================
 echo ""
-echo "=== Compilation ksud (SukiSU-Ultra builtin) ==="
+echo "=== Compilation ksud (SukiSU-Ultra susfs-dev) ==="
 cd "$GITHUB_WORKSPACE"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
@@ -314,7 +321,7 @@ export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-git clone --depth=1 --branch builtin https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 --branch susfs-dev https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
@@ -404,10 +411,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v5.3-boot.img
+cp final_boot.img output/SukiSU-Ultra-susfs-dev-v5.4-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v5.3 (SukiSU-Ultra builtin) ==="
+echo "=== BUILD TERMINÉ v5.4 (SukiSU-Ultra susfs-dev) ==="
 ls -lh output/
