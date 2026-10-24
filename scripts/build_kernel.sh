@@ -315,6 +315,36 @@ if 'struct file *orig = data->orig;' in content:
 with open(file_path, 'w') as f:
     f.write(content)
 print("=== Correctif file_wrapper.c terminé ===")
+# 10. Correctif pour seccomp_cache.c (SECCOMP_ARCH_NATIVE_NR sur noyau < 5.9)
+print("=== Application du correctif pour seccomp_cache.c ===")
+seccomp_path = 'drivers/kernelsu/infra/seccomp_cache.c'
+with open(seccomp_path, 'r') as f:
+    content = f.read()
+
+if 'SECCOMP_ARCH_NATIVE_NR' not in content or '#ifndef SECCOMP_ARCH_NATIVE_NR' not in content:
+    # Ajouter les définitions de secours au début du fichier, après les includes
+    fallback_defs = '''
+#ifndef SECCOMP_ARCH_NATIVE_NR
+#define SECCOMP_ARCH_NATIVE_NR NR_syscalls
+#endif
+#ifndef SECCOMP_ARCH_COMPAT_NR
+#define SECCOMP_ARCH_COMPAT_NR NR_syscalls
+#endif
+'''
+    # Trouver la première ligne après les includes pour insérer
+    import re
+    match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+    if match:
+        content = content[:match.end()] + fallback_defs + content[match.end():]
+        with open(seccomp_path, 'w') as f:
+            f.write(content)
+        print("  ✅ Définitions de secours pour SECCOMP_ARCH_NATIVE_NR injectées")
+    else:
+        print("  ⚠️  Impossible de trouver le bloc d'includes dans seccomp_cache.c")
+else:
+    print("  ✅ Définitions déjà présentes ou non nécessaires")
+
+print("=== Correctif seccomp_cache.c terminé ===")
 
 PYEOF
 
