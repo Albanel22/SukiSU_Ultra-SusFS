@@ -365,6 +365,27 @@ else:
 
 print("=== Correctif su_mount_ns.c terminé ===")
 
+# 12. Correctif pour pkg_observer.c (désactivation sur noyau < 5.9)
+print("=== Application du correctif pour pkg_observer.c ===")
+pkg_observer_path = 'drivers/kernelsu/manager/pkg_observer.c'
+with open(pkg_observer_path, 'r') as f:
+    content = f.read()
+
+# Encadrer l'assignation de handle_inode_event avec une garde de version
+if '.handle_inode_event = ksu_handle_inode_event,' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' not in content:
+    # Version avec indentation simple
+    content = content.replace(
+        '.handle_inode_event = ksu_handle_inode_event,',
+        '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n\t.handle_inode_event = ksu_handle_inode_event,\n#endif'
+    )
+    with open(pkg_observer_path, 'w') as f:
+        f.write(content)
+    print("  ✅ handle_inode_event désactivé sur noyau < 5.9")
+else:
+    print("  ✅ Déjà patché ou non concerné")
+
+print("=== Correctif pkg_observer.c terminé ===")
+
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
