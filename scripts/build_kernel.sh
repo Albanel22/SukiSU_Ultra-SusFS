@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # =============================================================================
-# V4.6 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
+# V4.7 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
 #        + Tous les correctifs pour noyau 4.19 + Stubs + path_mount
-#        + Vérification du Makefile pour les hooks
+#        + Vérification du Makefile pour les hooks + Fix import os
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra (susfs_new) pour noyau 4.19 ==="
@@ -135,6 +135,7 @@ echo "=== Application des patchs manuels et correctifs SukiSU-Ultra ==="
 
 python3 << 'PYEOF'
 import re
+import os
 
 # 1. fs/exec.c
 with open('fs/exec.c', 'r') as f: content = f.read()
@@ -663,7 +664,6 @@ if os.path.exists(makefile_path):
     with open(makefile_path, 'r') as f:
         makefile_content = f.read()
 
-    # Fichiers de hooks qui définissent les ksu_handle_*
     hook_files = [
         'feature/sucompat.o',
         'runtime/ksud_integration.o',
@@ -860,10 +860,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.6-boot.img
+cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.7-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.6 (SukiSU-Ultra susfs_new) ==="
+echo "=== BUILD TERMINÉ v4.7 (SukiSU-Ultra susfs_new) ==="
 ls -lh output/
