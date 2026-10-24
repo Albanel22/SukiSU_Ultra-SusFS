@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # =============================================================================
-# V4.5 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
-#        + TOUS les correctifs de compatibilité pour noyau 4.19
+# V4.6 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
+#        + Tous les correctifs pour noyau 4.19 + Stubs + path_mount
+#        + Vérification du Makefile pour les hooks
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra (susfs_new) pour noyau 4.19 ==="
@@ -247,7 +248,7 @@ int path_umount(struct path *path, int flags)
 '''
     content = re.sub(r'(int ksys_umount\(char __user \*name, int flags\))', backport + r'\1', content, count=1)
     with open('fs/namespace.c', 'w') as f: f.write(content)
-    print("✅ fs/namespace.c patché")
+    print("✅ fs/namespace.c patché (path_umount)")
 else:
     print("✅ fs/namespace.c déjà patché")
 
@@ -549,7 +550,7 @@ else:
 
 print("=== Correctif supercall/supercall.c terminé ===")
 
-# 19. Correctif selinux_hide.c (désactivation sur noyau < 5.10) - NOUVEAU
+# 19. Correctif selinux_hide.c (désactivation sur noyau < 5.10)
 print("=== Correctif selinux_hide.c ===")
 selinux_hide_path = 'drivers/kernelsu/feature/selinux_hide.c'
 with open(selinux_hide_path, 'r') as f:
@@ -572,6 +573,123 @@ else:
     print("  ✅ Déjà patché")
 
 print("=== Correctif selinux_hide.c terminé ===")
+
+# 20. Création des stubs pour les symboles manquants
+print("=== Création des stubs pour les symboles manquants ===")
+stubs_path = 'drivers/kernelsu/ksu_stubs.c'
+stubs_content = '''#include <linux/types.h>
+#include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/seccomp.h>
+#include <linux/mount.h>
+#include <linux/fs.h>
+
+#ifdef CONFIG_KSU
+/* Stubs pour selinux_hide désactivé sur noyau < 5.10 */
+void ksu_selinux_hide_init(void) {}
+void ksu_selinux_hide_exit(void) {}
+void ksu_selinux_hide_handle_second_stage(void) {}
+void ksu_selinux_hide_handle_post_fs_data(void) {}
+void ksu_selinux_hide_drop_backup_if_unused(void) {}
+
+/* Stub pour apply_kernelsu_rules (défini dans rules.c désactivé) */
+void apply_kernelsu_rules(void) {}
+
+/* Stub pour handle_sepolicy (défini dans sepolicy.c désactivé) */
+int handle_sepolicy(void *arg) { return 0; }
+#endif
+'''
+with open(stubs_path, 'w') as f:
+    f.write(stubs_content)
+print("  ✅ drivers/kernelsu/ksu_stubs.c créé")
+
+# Ajouter le fichier au Makefile de KernelSU
+makefile_path = 'drivers/kernelsu/Makefile'
+if not os.path.exists(makefile_path):
+    makefile_path = 'drivers/kernelsu/Kbuild'
+if os.path.exists(makefile_path):
+    with open(makefile_path, 'r') as f:
+        makefile_content = f.read()
+    if 'ksu_stubs.o' not in makefile_content:
+        makefile_content += '\nobj-$(CONFIG_KSU) += ksu_stubs.o\n'
+        with open(makefile_path, 'w') as f:
+            f.write(makefile_content)
+        print(f"  ✅ ksu_stubs.o ajouté au {makefile_path}")
+    else:
+        print(f"  ✅ ksu_stubs.o déjà dans {makefile_path}")
+else:
+    print("  ⚠️ Makefile/Kbuild de KernelSU introuvable")
+
+# 21. Backport de path_mount pour noyau < 5.9
+print("=== Backport de path_mount ===")
+namespace_path = 'fs/namespace.c'
+with open(namespace_path, 'r') as f:
+    content = f.read()
+
+if 'int path_mount(' not in content:
+    path_mount_backport = '''
+#ifdef CONFIG_KSU
+int path_mount(const char *dev_name, struct path *path,
+               const char *type_page, unsigned long flags, void *data_page)
+{
+    return do_mount(dev_name, path, type_page, flags, data_page);
+}
+#endif
+'''
+    anchor = 'int path_umount(struct path *path, int flags)'
+    if anchor in content:
+        match = re.search(r'int path_umount\(struct path \*path, int flags\).*?\n\}', content, re.DOTALL)
+        if match:
+            content = content[:match.end()] + '\n' + path_mount_backport + content[match.end():]
+        else:
+            content = content.replace('int ksys_umount(', path_mount_backport + '\nint ksys_umount(')
+    else:
+        content = content.replace('int ksys_umount(', path_mount_backport + '\nint ksys_umount(')
+    with open(namespace_path, 'w') as f:
+        f.write(content)
+    print("  ✅ path_mount backporté")
+else:
+    print("  ✅ path_mount déjà présent")
+
+print("=== Backport path_mount terminé ===")
+
+# 22. Vérification du Makefile de KernelSU pour les hooks
+print("=== Vérification du Makefile de KernelSU ===")
+makefile_path = 'drivers/kernelsu/Makefile'
+if not os.path.exists(makefile_path):
+    makefile_path = 'drivers/kernelsu/Kbuild'
+
+if os.path.exists(makefile_path):
+    with open(makefile_path, 'r') as f:
+        makefile_content = f.read()
+
+    # Fichiers de hooks qui définissent les ksu_handle_*
+    hook_files = [
+        'feature/sucompat.o',
+        'runtime/ksud_integration.o',
+        'supercall/dispatch.o',
+        'supercall/supercall.o',
+        'policy/app_profile.o',
+        'policy/allowlist.o',
+        'manager/pkg_observer.o'
+    ]
+
+    added = False
+    for hook in hook_files:
+        if hook not in makefile_content:
+            makefile_content += f'\nobj-$(CONFIG_KSU) += {hook}\n'
+            print(f"  ✅ {hook} ajouté au Makefile")
+            added = True
+
+    if added:
+        with open(makefile_path, 'w') as f:
+            f.write(makefile_content)
+    else:
+        print("  ✅ Tous les fichiers de hooks sont déjà dans le Makefile")
+else:
+    print("  ⚠️ Makefile/Kbuild de KernelSU introuvable")
+
+print("=== Vérification du Makefile terminée ===")
 
 PYEOF
 
@@ -742,10 +860,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.5-boot.img
+cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.6-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.5 (SukiSU-Ultra susfs_new) ==="
+echo "=== BUILD TERMINÉ v4.6 (SukiSU-Ultra susfs_new) ==="
 ls -lh output/
