@@ -443,6 +443,37 @@ else:
 
 print("=== Correctif app_profile.c terminé ===")
 
+# 15. Correctif pour rules.c (selinux_state.policy sur noyau < 5.7)
+print("=== Application du correctif pour rules.c ===")
+rules_path = 'drivers/kernelsu/selinux/rules.c'
+with open(rules_path, 'r') as f:
+    content = f.read()
+
+# Encadrer tout le fichier avec une garde de version
+# Sur les noyaux < 5.7, on désactive complètement la compilation de ce fichier
+if '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)' not in content:
+    # Trouver la première ligne non-commentaire après les includes
+    lines = content.split('\n')
+    insert_pos = 0
+    for i, line in enumerate(lines):
+        if line.strip() and not line.strip().startswith('//') and not line.strip().startswith('/*') and not line.strip().startswith('*') and not line.strip().startswith('#include'):
+            insert_pos = i
+            break
+    
+    # Insérer la garde au début du code
+    lines.insert(insert_pos, '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)')
+    # Ajouter le #endif à la fin
+    lines.append('#endif // LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)')
+    
+    content = '\n'.join(lines)
+    with open(rules_path, 'w') as f:
+        f.write(content)
+    print("  ✅ rules.c désactivé sur noyau < 5.7 (selinux_state.policy inexistant)")
+else:
+    print("  ✅ Déjà patché ou non concerné")
+
+print("=== Correctif rules.c terminé ===")
+
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
