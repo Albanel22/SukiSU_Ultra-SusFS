@@ -386,6 +386,41 @@ else:
 
 print("=== Correctif pkg_observer.c terminé ===")
 
+# 13. Correctif pour allowlist.c (TWA_RESUME et put_task_struct sur noyau < 5.9)
+print("=== Application du correctif pour allowlist.c ===")
+allowlist_path = 'drivers/kernelsu/policy/allowlist.c'
+with open(allowlist_path, 'r') as f:
+    content = f.read()
+
+# 1. Ajouter une définition de secours pour TWA_RESUME
+if 'TWA_RESUME' in content and '#ifndef TWA_RESUME' not in content:
+    fallback_def = '''
+#ifndef TWA_RESUME
+#define TWA_RESUME 1
+#endif
+'''
+    # Insérer après les includes
+    match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+    if match:
+        content = content[:match.end()] + fallback_def + content[match.end():]
+        print("  ✅ Définition de secours pour TWA_RESUME injectée")
+    else:
+        print("  ⚠️  Impossible de trouver le bloc d'includes dans allowlist.c")
+
+# 2. Ajouter l'include pour put_task_struct
+if '#include <linux/sched/task.h>' not in content:
+    # Ajouter après les autres includes
+    match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+    if match:
+        content = content[:match.end()] + '#include <linux/sched/task.h>\n' + content[match.end():]
+        print("  ✅ Include <linux/sched/task.h> ajouté pour put_task_struct")
+    else:
+        print("  ⚠️  Impossible de trouver le bloc d'includes dans allowlist.c")
+
+with open(allowlist_path, 'w') as f:
+    f.write(content)
+print("=== Correctif allowlist.c terminé ===")
+
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
