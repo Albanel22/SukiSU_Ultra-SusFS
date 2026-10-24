@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V5.6 : SukiSU-Ultra (susfs-main) + TAMPER_SYSCALL_TABLE + SUSFS
-#        + Gardes de compatibilité noyau 4.19 + backports path_umount/mount
+# V5.7 : SukiSU-Ultra (susfs-dev) + TAMPER_SYSCALL_TABLE + SUSFS
+#        + Garde vdso_clock_mode (cpu_spoof.c) + backports path_umount/mount
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (susfs-main) pour noyau 4.19 ==="
+echo "=== Build SukiSU-Ultra (susfs-dev) pour noyau 4.19 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -28,16 +28,16 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION SukiSU-Ultra (susfs-main) ====================
-echo "=== Intégration SukiSU-Ultra (susfs-main avec SUSFS intégré) ==="
+# ==================== 2. INTÉGRATION SukiSU-Ultra (susfs-dev) ====================
+echo "=== Intégration SukiSU-Ultra (susfs-dev avec SUSFS intégré) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
     echo "❌ Échec intégration SukiSU-Ultra"; exit 1
 fi
-echo "✅ SukiSU-Ultra (susfs-main) intégré"
+echo "✅ SukiSU-Ultra (susfs-dev) intégré"
 
 if [ -d "drivers/kernelsu" ]; then
     KSU_DIR="drivers/kernelsu"
@@ -51,7 +51,7 @@ echo "KSU_DIR : $KSU_DIR"
 if find . -name "susfs.h" -path "*/linux/*" 2>/dev/null | grep -q .; then
     echo "✅ Fichier susfs.h trouvé"
 else
-    echo "⚠️ susfs.h non trouvé, la compilation peut échouer plus tard"
+    echo "⚠️ susfs.h non trouvé, vérifie la branche"
 fi
 
 # ==================== 2b. NEUTRALISATION CHECK.MK ====================
@@ -174,7 +174,7 @@ MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
             return content
         modify_file(ksu_c_path, transform_import_ns, f"MODULE_IMPORT_NS dans {ksu_c_path}")
 
-# 3. file_wrapper.c : iopoll + remap_file_range + unused orig
+# 3. file_wrapper.c
 print("=== Correctif file_wrapper.c ===")
 for file_path in ['drivers/kernelsu/infra/file_wrapper.c', 'drivers/kernelsu/file_wrapper.c']:
     if os.path.exists(file_path):
@@ -343,7 +343,27 @@ for selinux_hide_path in ['drivers/kernelsu/feature/selinux_hide.c', 'drivers/ke
             return content
         modify_file(selinux_hide_path, transform_selinux_hide, f"selinux_hide.c dans {selinux_hide_path}")
 
-# 12. Backports path_umount + path_mount
+# 12. extension/cpu_spoof.c (vdso_clock_mode)
+print("=== Correctif extension/cpu_spoof.c ===")
+for cpu_spoof_path in ['drivers/kernelsu/extension/cpu_spoof.c']:
+    if os.path.exists(cpu_spoof_path):
+        def transform_cpu_spoof(content):
+            if 'vdso_clock_mode' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)' not in content:
+                old_block = '''(*curr_cs_ptr)->vdso_clock_mode ='''
+                new_block = '''#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
+                        (*curr_cs_ptr)->vdso_clock_mode ='''
+                content = content.replace(old_block, new_block)
+                # Fermer le #if juste après la ligne d'assignation
+                content = re.sub(
+                    r'(#if LINUX_VERSION_CODE >= KERNEL_VERSION\(5, 7, 0\)\n\s*\(\*curr_cs_ptr\)->vdso_clock_mode\s*=\s*[^;]+;)',
+                    r'\1\n#endif',
+                    content
+                )
+                print("  ✅ vdso_clock_mode conditionnel")
+            return content
+        modify_file(cpu_spoof_path, transform_cpu_spoof, f"cpu_spoof.c dans {cpu_spoof_path}")
+
+# 13. Backports path_umount + path_mount
 print("=== Backport path_umount et path_mount ===")
 namespace_path = 'fs/namespace.c'
 with open(namespace_path, 'r') as f:
@@ -439,9 +459,9 @@ print("=== Correctifs terminés ===")
 
 PYEOF
 
-# ==================== 4. CONFIGURATION (susfs-main) ====================
+# ==================== 4. CONFIGURATION (susfs-dev) ====================
 echo ""
-echo "=== Configuration (SukiSU-Ultra susfs-main + TAMPER_SYSCALL_TABLE) ==="
+echo "=== Configuration (SukiSU-Ultra susfs-dev + TAMPER_SYSCALL_TABLE) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -503,9 +523,9 @@ else
     exit 1
 fi
 
-# ==================== 7. COMPILATION KSUD (susfs-main) ====================
+# ==================== 7. COMPILATION KSUD (susfs-dev) ====================
 echo ""
-echo "=== Compilation ksud (SukiSU-Ultra susfs-main) ==="
+echo "=== Compilation ksud (SukiSU-Ultra susfs-dev) ==="
 cd "$GITHUB_WORKSPACE"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
@@ -518,7 +538,7 @@ export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-git clone --depth=1 --branch susfs-main https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 --branch susfs-dev https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
@@ -608,10 +628,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-susfs-main-v5.6-boot.img
+cp final_boot.img output/SukiSU-Ultra-susfs-dev-v5.7-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v5.6 (SukiSU-Ultra susfs-main) ==="
+echo "=== BUILD TERMINÉ v5.7 (SukiSU-Ultra susfs-dev) ==="
 ls -lh output/
