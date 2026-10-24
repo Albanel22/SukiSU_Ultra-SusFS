@@ -2,9 +2,8 @@
 set -euo pipefail
 
 # =============================================================================
-# V4.7 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
-#        + Tous les correctifs pour noyau 4.19 + Stubs + path_mount
-#        + Vérification du Makefile pour les hooks + Fix import os
+# V4.8 : SukiSU-Ultra (susfs_new) + Hooks Manuels + Backport path_umount
+#        + Tous les correctifs pour noyau 4.19 + Stubs + path_mount correct
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra (susfs_new) pour noyau 4.19 ==="
@@ -207,10 +206,11 @@ if 'ksu_handle_sys_reboot' not in content:
 else:
     print("✅ kernel/reboot.c déjà patché")
 
-# 6. fs/namespace.c (Backport de path_umount)
+# 6. fs/namespace.c (Backport de path_umount + path_mount corrigé)
 with open('fs/namespace.c', 'r') as f: content = f.read()
+
 if 'int path_umount(struct path *path, int flags)' not in content:
-    backport = '''
+    backport_umount = '''
 #ifdef CONFIG_KSU
 static int can_umount(const struct path *path, int flags)
 {
@@ -247,11 +247,64 @@ int path_umount(struct path *path, int flags)
 #endif
 
 '''
-    content = re.sub(r'(int ksys_umount\(char __user \*name, int flags\))', backport + r'\1', content, count=1)
-    with open('fs/namespace.c', 'w') as f: f.write(content)
-    print("✅ fs/namespace.c patché (path_umount)")
-else:
-    print("✅ fs/namespace.c déjà patché")
+    content = re.sub(r'(int ksys_umount\(char __user \*name, int flags\))', backport_umount + r'\1', content, count=1)
+    print("✅ path_umount backporté")
+
+# Vérifier si path_mount existe déjà et corriger si nécessaire
+if 'int path_mount(' in content and 'set_fs(KERNEL_DS)' not in content:
+    # Remplacer l'ancien path_mount par la version corrigée
+    content = re.sub(
+        r'#ifdef CONFIG_KSU\nint path_mount\(const char \*dev_name, struct path \*path,\s*\n\s*const char \*type_page, unsigned long flags, void \*data_page\)\s*\n\{\s*\n\s*return do_mount\(dev_name, path, type_page, flags, data_page\);\s*\n\}\s*\n#endif',
+        '',
+        content
+    )
+    print("  ⚠️ Ancien path_mount supprimé (incompatible)")
+
+if 'int path_mount(' not in content:
+    backport_mount = '''
+#ifdef CONFIG_KSU
+int path_mount(const char *dev_name, struct path *path,
+               const char *type_page, unsigned long flags, void *data_page)
+{
+    char *page = (char *)__get_free_page(GFP_KERNEL);
+    char *p;
+    int ret;
+    mm_segment_t old_fs;
+
+    if (!page)
+        return -ENOMEM;
+
+    p = d_path(path, page, PAGE_SIZE);
+    if (IS_ERR(p)) {
+        ret = PTR_ERR(p);
+        goto out_free;
+    }
+
+    old_fs = get_fs();
+    set_fs(KERNEL_DS);
+    ret = do_mount(dev_name, (const char __user *)p, type_page, flags, data_page);
+    set_fs(old_fs);
+
+out_free:
+    free_page((unsigned long)page);
+    return ret;
+}
+#endif
+
+'''
+    anchor = 'int path_umount(struct path *path, int flags)'
+    if anchor in content:
+        match = re.search(r'int path_umount\(struct path \*path, int flags\).*?\n\}', content, re.DOTALL)
+        if match:
+            content = content[:match.end()] + '\n' + backport_mount + content[match.end():]
+        else:
+            content = content.replace('int ksys_umount(', backport_mount + '\nint ksys_umount(')
+    else:
+        content = content.replace('int ksys_umount(', backport_mount + '\nint ksys_umount(')
+    print("  ✅ path_mount backporté avec d_path + set_fs")
+
+with open('fs/namespace.c', 'w') as f: f.write(content)
+print("=== Correctif fs/namespace.c terminé ===")
 
 # 7. Correctif MODULE_IMPORT_NS
 with open('drivers/kernelsu/core/init.c', 'r') as f: content = f.read()
@@ -621,40 +674,7 @@ if os.path.exists(makefile_path):
 else:
     print("  ⚠️ Makefile/Kbuild de KernelSU introuvable")
 
-# 21. Backport de path_mount pour noyau < 5.9
-print("=== Backport de path_mount ===")
-namespace_path = 'fs/namespace.c'
-with open(namespace_path, 'r') as f:
-    content = f.read()
-
-if 'int path_mount(' not in content:
-    path_mount_backport = '''
-#ifdef CONFIG_KSU
-int path_mount(const char *dev_name, struct path *path,
-               const char *type_page, unsigned long flags, void *data_page)
-{
-    return do_mount(dev_name, path, type_page, flags, data_page);
-}
-#endif
-'''
-    anchor = 'int path_umount(struct path *path, int flags)'
-    if anchor in content:
-        match = re.search(r'int path_umount\(struct path \*path, int flags\).*?\n\}', content, re.DOTALL)
-        if match:
-            content = content[:match.end()] + '\n' + path_mount_backport + content[match.end():]
-        else:
-            content = content.replace('int ksys_umount(', path_mount_backport + '\nint ksys_umount(')
-    else:
-        content = content.replace('int ksys_umount(', path_mount_backport + '\nint ksys_umount(')
-    with open(namespace_path, 'w') as f:
-        f.write(content)
-    print("  ✅ path_mount backporté")
-else:
-    print("  ✅ path_mount déjà présent")
-
-print("=== Backport path_mount terminé ===")
-
-# 22. Vérification du Makefile de KernelSU pour les hooks
+# 21. Vérification du Makefile de KernelSU pour les hooks
 print("=== Vérification du Makefile de KernelSU ===")
 makefile_path = 'drivers/kernelsu/Makefile'
 if not os.path.exists(makefile_path):
@@ -860,10 +880,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.7-boot.img
+cp final_boot.img output/SukiSU-Ultra-SUSFS-v4.8-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.7 (SukiSU-Ultra susfs_new) ==="
+echo "=== BUILD TERMINÉ v4.8 (SukiSU-Ultra susfs_new) ==="
 ls -lh output/
