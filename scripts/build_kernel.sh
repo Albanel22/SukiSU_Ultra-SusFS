@@ -421,6 +421,28 @@ with open(allowlist_path, 'w') as f:
     f.write(content)
 print("=== Correctif allowlist.c terminé ===")
 
+# 14. Correctif pour app_profile.c (filter_count sur noyau < 5.9)
+print("=== Application du correctif pour app_profile.c ===")
+app_profile_path = 'drivers/kernelsu/policy/app_profile.c'
+with open(app_profile_path, 'r') as f:
+    content = f.read()
+
+# Encadrer l'utilisation de filter_count avec une garde de version
+old_line = 'atomic_set(&current->seccomp.filter_count, 0);'
+new_block = '''#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+	atomic_set(&current->seccomp.filter_count, 0);
+#endif'''
+
+if old_line in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' not in content:
+    content = content.replace(old_line, new_block)
+    with open(app_profile_path, 'w') as f:
+        f.write(content)
+    print("  ✅ filter_count conditionnel ajouté (ignoré sur noyau < 5.9)")
+else:
+    print("  ✅ Déjà patché ou non concerné")
+
+print("=== Correctif app_profile.c terminé ===")
+
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
