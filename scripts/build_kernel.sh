@@ -215,6 +215,39 @@ for file_path in ['drivers/kernelsu/infra/file_wrapper.c', 'drivers/kernelsu/fil
             return content
         modify_file(file_path, transform_file_wrapper, f"file_wrapper.c dans {file_path}")
 
+# Correctif pour supercall/dispatch.c (includes manquants)
+print("=== Correctif supercall/dispatch.c ===")
+dispatch_path = 'drivers/kernelsu/supercall/dispatch.c'
+if os.path.exists(dispatch_path):
+    with open(dispatch_path, 'r') as f:
+        content = f.read()
+
+    # Ajouter les includes nécessaires s'ils ne sont pas déjà présents
+    includes_to_add = [
+        '#include <linux/sched.h>',
+        '#include <linux/sched/task.h>',
+        '#include <linux/init_task.h>'
+    ]
+
+    added_any = False
+    for inc in includes_to_add:
+        if inc not in content:
+            # Insérer après le dernier #include existant
+            import re
+            match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+            if match:
+                content = content[:match.end()] + inc + '\n' + content[match.end():]
+                print(f"  ✅ Ajout de {inc}")
+                added_any = True
+
+    if added_any:
+        with open(dispatch_path, 'w') as f:
+            f.write(content)
+    else:
+        print("  ✅ Tous les includes nécessaires sont déjà présents")
+else:
+    print("  ⚠️ dispatch.c introuvable")
+
 # 4. seccomp_cache.c
 print("=== Correctif seccomp_cache.c ===")
 for seccomp_path in ['drivers/kernelsu/infra/seccomp_cache.c', 'drivers/kernelsu/seccomp_cache.c']:
