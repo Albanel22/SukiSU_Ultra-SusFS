@@ -1,13 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-
 # =============================================================================
-# V6.1 : SukiSU-Ultra (fork ShirkNeko, branche susfs-dev)
-#        Branche recommandée : SUSFS inclus + support non-GKI
+# V7.0 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
+#        Objectif : noyau qui boote + Manager qui détecte (root fonctionnel)
+#        SUSFS sera ajouté dans un V8 via le patch JackA1ltman
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (ShirkNeko/susfs-dev) pour noyau 4.19 ==="
+echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -29,17 +29,16 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION SukiSU-Ultra (ShirkNeko/susfs-dev) ====================
-echo "=== Intégration SukiSU-Ultra (ShirkNeko/susfs-dev avec SUSFS intégré) ==="
+# ==================== 2. INTÉGRATION SukiSU-Ultra (builtin) ====================
+echo "=== Intégration SukiSU-Ultra (ShirkNeko/builtin) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-# Utilisation du fork ShirkNeko avec la branche susfs-dev
-curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
+curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
     echo "❌ Échec intégration SukiSU-Ultra"; exit 1
 fi
-echo "✅ SukiSU-Ultra (ShirkNeko/susfs-dev) intégré"
+echo "✅ SukiSU-Ultra (builtin) intégré"
 
 if [ -d "drivers/kernelsu" ]; then
     KSU_DIR="drivers/kernelsu"
@@ -49,12 +48,6 @@ else
     KSU_DIR="KernelSU"
 fi
 echo "KSU_DIR : $KSU_DIR"
-
-if find . -name "susfs.h" -path "*/linux/*" 2>/dev/null | grep -q .; then
-    echo "✅ Fichier susfs.h trouvé (SUSFS intégré)"
-else
-    echo "⚠️ susfs.h non trouvé, la compilation pourrait échouer"
-fi
 
 # ==================== 2b. NEUTRALISATION CHECK.MK ====================
 echo ""
@@ -148,13 +141,11 @@ static_call_h_path = 'include/linux/static_call.h'
 if not os.path.exists(static_call_h_path):
     static_call_content = '''#ifndef _LINUX_STATIC_CALL_H
 #define _LINUX_STATIC_CALL_H
-
 #define static_call(name) (name##_static_call)
 #define static_call_cond(name) (name##_static_call)
 #define static_call_update(name, func) do { } while (0)
 #define static_call_query(name) (name##_static_call)
-
-#endif /* _LINUX_STATIC_CALL_H */
+#endif
 '''
     with open(static_call_h_path, 'w') as f:
         f.write(static_call_content)
@@ -214,39 +205,6 @@ for file_path in ['drivers/kernelsu/infra/file_wrapper.c', 'drivers/kernelsu/fil
                 )
             return content
         modify_file(file_path, transform_file_wrapper, f"file_wrapper.c dans {file_path}")
-
-# Correctif pour supercall/dispatch.c (includes manquants)
-print("=== Correctif supercall/dispatch.c ===")
-dispatch_path = 'drivers/kernelsu/supercall/dispatch.c'
-if os.path.exists(dispatch_path):
-    with open(dispatch_path, 'r') as f:
-        content = f.read()
-
-    # Ajouter les includes nécessaires s'ils ne sont pas déjà présents
-    includes_to_add = [
-        '#include <linux/sched.h>',
-        '#include <linux/sched/task.h>',
-        '#include <linux/init_task.h>'
-    ]
-
-    added_any = False
-    for inc in includes_to_add:
-        if inc not in content:
-            # Insérer après le dernier #include existant
-            import re
-            match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
-            if match:
-                content = content[:match.end()] + inc + '\n' + content[match.end():]
-                print(f"  ✅ Ajout de {inc}")
-                added_any = True
-
-    if added_any:
-        with open(dispatch_path, 'w') as f:
-            f.write(content)
-    else:
-        print("  ✅ Tous les includes nécessaires sont déjà présents")
-else:
-    print("  ⚠️ dispatch.c introuvable")
 
 # 4. seccomp_cache.c
 print("=== Correctif seccomp_cache.c ===")
@@ -310,7 +268,42 @@ for allowlist_path in ['drivers/kernelsu/policy/allowlist.c', 'drivers/kernelsu/
             return content
         modify_file(allowlist_path, transform_allowlist, f"allowlist.c dans {allowlist_path}")
 
-# 8. app_profile.c
+# 8. supercall/supercall.c (TWA_RESUME) — NOUVEAU
+print("=== Correctif supercall/supercall.c ===")
+for supercall_path in ['drivers/kernelsu/supercall/supercall.c']:
+    if os.path.exists(supercall_path):
+        def transform_supercall(content):
+            if 'TWA_RESUME' in content and '#ifndef TWA_RESUME' not in content:
+                fallback_def = '''
+#ifndef TWA_RESUME
+#define TWA_RESUME 1
+#endif
+'''
+                match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+                if match:
+                    return content[:match.end()] + fallback_def + content[match.end():]
+            return content
+        modify_file(supercall_path, transform_supercall, f"supercall.c (TWA_RESUME) dans {supercall_path}")
+
+# 9. supercall/dispatch.c (includes manquants) — NOUVEAU
+print("=== Correctif supercall/dispatch.c ===")
+for dispatch_path in ['drivers/kernelsu/supercall/dispatch.c']:
+    if os.path.exists(dispatch_path):
+        def transform_dispatch(content):
+            includes_to_add = [
+                '#include <linux/sched.h>',
+                '#include <linux/sched/task.h>',
+                '#include <linux/init_task.h>'
+            ]
+            for inc in includes_to_add:
+                if inc not in content:
+                    match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+                    if match:
+                        content = content[:match.end()] + inc + '\n' + content[match.end():]
+            return content
+        modify_file(dispatch_path, transform_dispatch, f"dispatch.c dans {dispatch_path}")
+
+# 10. app_profile.c
 print("=== Correctif app_profile.c ===")
 for app_profile_path in ['drivers/kernelsu/policy/app_profile.c', 'drivers/kernelsu/app_profile.c']:
     if os.path.exists(app_profile_path):
@@ -324,7 +317,7 @@ for app_profile_path in ['drivers/kernelsu/policy/app_profile.c', 'drivers/kerne
             return content
         modify_file(app_profile_path, transform_app_profile, f"app_profile.c dans {app_profile_path}")
 
-# 9. rules.c
+# 11. rules.c
 print("=== Correctif rules.c ===")
 for rules_path in ['drivers/kernelsu/selinux/rules.c', 'drivers/kernelsu/rules.c']:
     if os.path.exists(rules_path):
@@ -342,7 +335,7 @@ for rules_path in ['drivers/kernelsu/selinux/rules.c', 'drivers/kernelsu/rules.c
             return content
         modify_file(rules_path, transform_rules, f"rules.c dans {rules_path}")
 
-# 10. sepolicy.c
+# 12. sepolicy.c
 print("=== Correctif sepolicy.c ===")
 for sepolicy_path in ['drivers/kernelsu/selinux/sepolicy.c', 'drivers/kernelsu/sepolicy.c']:
     if os.path.exists(sepolicy_path):
@@ -360,7 +353,7 @@ for sepolicy_path in ['drivers/kernelsu/selinux/sepolicy.c', 'drivers/kernelsu/s
             return content
         modify_file(sepolicy_path, transform_sepolicy, f"sepolicy.c dans {sepolicy_path}")
 
-# 11. selinux_hide.c
+# 13. selinux_hide.c
 print("=== Correctif selinux_hide.c ===")
 for selinux_hide_path in ['drivers/kernelsu/feature/selinux_hide.c', 'drivers/kernelsu/selinux_hide.c']:
     if os.path.exists(selinux_hide_path):
@@ -378,7 +371,7 @@ for selinux_hide_path in ['drivers/kernelsu/feature/selinux_hide.c', 'drivers/ke
             return content
         modify_file(selinux_hide_path, transform_selinux_hide, f"selinux_hide.c dans {selinux_hide_path}")
 
-# 12. extension/cpu_spoof.c (vdso_clock_mode)
+# 14. extension/cpu_spoof.c
 print("=== Correctif extension/cpu_spoof.c ===")
 for cpu_spoof_path in ['drivers/kernelsu/extension/cpu_spoof.c']:
     if os.path.exists(cpu_spoof_path):
@@ -397,18 +390,15 @@ for cpu_spoof_path in ['drivers/kernelsu/extension/cpu_spoof.c']:
             return content
         modify_file(cpu_spoof_path, transform_cpu_spoof, f"cpu_spoof.c dans {cpu_spoof_path}")
 
-# 13. sulog/event.c (minmax.h)
-print("=== Correctif sulog/event.c (minmax.h) ===")
+# 15. sulog/event.c
+print("=== Correctif sulog/event.c ===")
 for event_path in ['drivers/kernelsu/sulog/event.c']:
     if os.path.exists(event_path):
         def transform_event(content):
-            return content.replace(
-                '#include <linux/minmax.h>',
-                '#include <linux/kernel.h>'
-            )
+            return content.replace('#include <linux/minmax.h>', '#include <linux/kernel.h>')
         modify_file(event_path, transform_event, f"sulog/event.c dans {event_path}")
 
-# 14. Backports path_umount + path_mount
+# 16. Backports path_umount + path_mount
 print("=== Backport path_umount et path_mount ===")
 namespace_path = 'fs/namespace.c'
 with open(namespace_path, 'r') as f:
@@ -420,7 +410,6 @@ if 'int path_umount(struct path *path, int flags)' not in content:
 static int can_umount(const struct path *path, int flags)
 {
 	struct mount *mnt = real_mount(path->mnt);
-
 	if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
 		return -EINVAL;
 	if (!may_mount())
@@ -440,17 +429,14 @@ int path_umount(struct path *path, int flags)
 {
 	struct mount *mnt = real_mount(path->mnt);
 	int ret;
-
 	ret = can_umount(path, flags);
 	if (!ret)
 		ret = do_umount(mnt, flags);
-
 	dput(path->dentry);
 	mntput_no_expire(mnt);
 	return ret;
 }
 #endif
-
 '''
     content = re.sub(r'(int ksys_umount\(char __user \*name, int flags\))', backport_umount + r'\1', content, count=1)
     print("  ✅ path_umount backporté")
@@ -465,27 +451,22 @@ int path_mount(const char *dev_name, struct path *path,
     char *p;
     int ret;
     mm_segment_t old_fs;
-
     if (!page)
         return -ENOMEM;
-
     p = d_path(path, page, PAGE_SIZE);
     if (IS_ERR(p)) {
         ret = PTR_ERR(p);
         goto out_free;
     }
-
     old_fs = get_fs();
     set_fs(KERNEL_DS);
     ret = do_mount(dev_name, (const char __user *)p, type_page, flags, data_page);
     set_fs(old_fs);
-
 out_free:
     free_page((unsigned long)page);
     return ret;
 }
 #endif
-
 '''
     anchor = 'int path_umount(struct path *path, int flags)'
     if anchor in content:
@@ -496,7 +477,7 @@ out_free:
             content = content.replace('int ksys_umount(', backport_mount + '\nint ksys_umount(')
     else:
         content = content.replace('int ksys_umount(', backport_mount + '\nint ksys_umount(')
-    print("  ✅ path_mount backporté (d_path + set_fs)")
+    print("  ✅ path_mount backporté")
 
 with open(namespace_path, 'w') as f:
     f.write(content)
@@ -504,9 +485,9 @@ print("=== Correctifs terminés ===")
 
 PYEOF
 
-# ==================== 4. CONFIGURATION ====================
+# ==================== 4. CONFIGURATION (SANS SUSFS) ====================
 echo ""
-echo "=== Configuration (SukiSU-Ultra ShirkNeko/susfs-dev + TAMPER_SYSCALL_TABLE) ==="
+echo "=== Configuration (SukiSU-Ultra builtin, SANS SUSFS) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -515,19 +496,13 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 {
   echo "CONFIG_KSU=y"
-  echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y"
+  echo "CONFIG_KSU_MANUAL_HOOK=y"
+  echo "# CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set"
+  echo "# CONFIG_KSU_SUSFS is not set"  # Désactivé : susfs.h absent
+  echo "# CONFIG_KSU_TRACEPOINT_HOOK is not set"
   echo "CONFIG_KSU_LSM_SECURITY_HOOKS=y"
   echo "CONFIG_KSU_FEATURE_SULOG=y"
   echo "CONFIG_KSU_FEATURE_ADBROOT=y"
-  echo "CONFIG_KSU_SUSFS=y"
-  echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-  echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-  echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
-  echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-  echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
-  echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
-  echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-  echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
   echo "CONFIG_KALLSYMS=y"
   echo "CONFIG_KALLSYMS_ALL=y"
   echo "CONFIG_KPROBES=y"
@@ -542,7 +517,7 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -5
 
 echo "=== État final .config ==="
-grep -E "KSU_TAMPER|KSU_SUSFS|KSU_HACK|KSU_KPROBES|KALLSYMS|SECCOMP" out/.config | head -20 || true
+grep -E "KSU_MANUAL_HOOK|KSU_SUSFS|KSU_TAMPER|KSU_LSM|KALLSYMS|SECCOMP" out/.config | head -20 || true
 
 if ! grep -q "^CONFIG_KSU=y" out/.config; then
     echo "❌ CONFIG_KSU non activé, abandon"
@@ -568,9 +543,9 @@ else
     exit 1
 fi
 
-# ==================== 7. COMPILATION KSUD (ShirkNeko/susfs-dev) ====================
+# ==================== 7. COMPILATION KSUD ====================
 echo ""
-echo "=== Compilation ksud (SukiSU-Ultra ShirkNeko/susfs-dev) ==="
+echo "=== Compilation ksud (SukiSU-Ultra builtin) ==="
 cd "$GITHUB_WORKSPACE"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
@@ -583,7 +558,7 @@ export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-git clone --depth=1 --branch susfs-dev https://github.com/ShirkNeko/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 --branch builtin https://github.com/ShirkNeko/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
@@ -673,10 +648,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-ShirkNeko-v6.1-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.0-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v6.1 (SukiSU-Ultra ShirkNeko/susfs-dev) ==="
+echo "=== BUILD TERMINÉ v7.0 (SukiSU-Ultra builtin, SANS SUSFS) ==="
 ls -lh output/
