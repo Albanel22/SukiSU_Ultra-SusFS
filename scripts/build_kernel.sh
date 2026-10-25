@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.3 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
-#        V7.3 : fix access_ok bulletproof (sed + placeholder)
-#                + vérification explicite + garde V7.2 conservées
+# V7.4 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
+#        V7.4 : fix access_ok explicite + vérification avant/après
+#                + fallback #if 0 si le fix échoue
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.3 ==="
+echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.4 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -482,7 +482,7 @@ out_free:
 with open(namespace_path, 'w') as f:
     f.write(content)
 
-# ==================== 3c. Fix A : KSU_NO_PREINIT (V7.2, conservé) ====================
+# ==================== 3c. Fix A : KSU_NO_PREINIT ====================
 print("")
 print("=== Fix A : KSU_NO_PREINIT ===")
 preinit_h = 'drivers/kernelsu/preinit/common/preinit.h'
@@ -585,68 +585,48 @@ print("=== Correctifs Python terminés ===")
 
 PYEOF
 
-# ==================== 3e. FIX B BULLETPROOF : access_ok → ksu_access_ok (sed) ====================
+# ==================== 3e. FIX B V7.4 : access_ok → ksu_access_ok (VERBEUX) ====================
 echo ""
-echo "=== Fix B bulletproof : access_ok → ksu_access_ok (sed + placeholder) ==="
+echo "=== Fix B V7.4 : access_ok → ksu_access_ok (verbeux) ==="
+echo "PWD: $(pwd)"
+echo "Contenu de drivers/kernelsu :"
+ls drivers/kernelsu/ 2>/dev/null | head -15
 
-KPM_C=$(find drivers/kernelsu -path '*/kpm/kpm.c' -type f 2>/dev/null | head -1)
-if [ -z "$KPM_C" ]; then
-    KPM_C=$(find drivers/kernelsu -name 'kpm.c' -type f 2>/dev/null | head -1)
+KPM_FILE="drivers/kernelsu/extension/kpm/kpm.c"
+if [ ! -f "$KPM_FILE" ]; then
+    echo "  ⚠️  $KPM_FILE introuvable, recherche..."
+    KPM_FILE=$(find . -name 'kpm.c' -path '*kernelsu*' 2>/dev/null | head -1)
+    echo "  Trouvé: $KPM_FILE"
 fi
 
-if [ -n "$KPM_C" ] && [ -f "$KPM_C" ]; then
-    echo "  KPM_C = $KPM_C"
-    # Étape 1 : protéger les ksu_access_ok existants avec un placeholder
-    sed -i 's/ksu_access_ok(/__KSU_AOK_PLACEHOLDER__(/g' "$KPM_C"
-    # Étape 2 : remplacer tous les access_ok( nus par ksu_access_ok(
-    sed -i 's/access_ok(/ksu_access_ok(/g' "$KPM_C"
-    # Étape 3 : restaurer le placeholder
-    sed -i 's/__KSU_AOK_PLACEHOLDER__(/ksu_access_ok(/g' "$KPM_C"
-    echo "  ✅ access_ok → ksu_access_ok appliqué"
+if [ -n "$KPM_FILE" ] && [ -f "$KPM_FILE" ]; then
+    echo ""
+    echo "=== AVANT : lignes avec access_ok dans $KPM_FILE ==="
+    grep -n 'access_ok' "$KPM_FILE" | head -20 || echo "  (aucune)"
 
-    # Vérification
-    if grep -q '[^_]access_ok(' "$KPM_C" 2>/dev/null; then
-        echo "  ⚠️  Des appels access_ok( nus restent :"
-        grep -n '[^_]access_ok(' "$KPM_C" | head -5
+    # Remplacement simple et direct
+    sed -i 's/access_ok(/ksu_access_ok(/g' "$KPM_FILE"
+
+    echo ""
+    echo "=== APRÈS : lignes avec access_ok dans $KPM_FILE ==="
+    grep -n 'access_ok' "$KPM_FILE" | head -20 || echo "  (aucune)"
+
+    # Vérification : plus aucun access_ok( nu (précédé de ! ou espace ou paren)
+    if grep -q '!access_ok(' "$KPM_FILE"; then
+        echo "  ❌ Des !access_ok( restent — fallback #if 0"
+        KSU_MAIN="drivers/kernelsu/ksu_main.c"
+        if [ -f "$KSU_MAIN" ]; then
+            # Chercher la ligne d'include de kpm.c
+            if grep -q 'extension/kpm/kpm.c' "$KSU_MAIN"; then
+                sed -i 's|#include "extension/kpm/kpm.c"|#if 0 /* V7.4 fallback: KPM disabled for 4.19 */\n#include "extension/kpm/kpm.c"\n#endif|' "$KSU_MAIN"
+                echo "  ✅ kpm.c include désactivé dans ksu_main.c"
+            fi
+        fi
     else
-        echo "  ✅ Aucun access_ok( nu restant"
+        echo "  ✅ Aucun !access_ok( restant"
     fi
-    echo "  Aperçu des lignes ksu_access_ok :"
-    grep -n 'ksu_access_ok(' "$KPM_C" | head -3
 else
-    echo "  ⚠️  kpm.c introuvable"
-fi
-
-# Ensure macro dans kernel_compat.h
-COMPAT_H=$(find drivers/kernelsu -name 'kernel_compat.h' -type f 2>/dev/null | head -1)
-if [ -n "$COMPAT_H" ] && [ -f "$COMPAT_H" ]; then
-    if ! grep -q 'define ksu_access_ok' "$COMPAT_H"; then
-        echo "  ⚠️  Macro ksu_access_ok absent de $COMPAT_H, ajout..."
-        python3 - "$COMPAT_H" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path, 'r') as f:
-    content = f.read()
-macro = '''
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
-#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)
-#else
-#define ksu_access_ok(addr, size) access_ok(addr, size)
-#endif
-'''
-match = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', content))
-if match:
-    last = match[-1]
-    content = content[:last.end()] + macro + content[last.end():]
-else:
-    content = macro + content
-with open(path, 'w') as f:
-    f.write(content)
-print("  ✅ ksu_access_ok macro ajouté dans kernel_compat.h")
-PYEOF
-    else
-        echo "  ✅ ksu_access_ok macro déjà présent dans $COMPAT_H"
-    fi
+    echo "  ❌ kpm.c introuvable"
 fi
 
 # ==================== 4. CONFIGURATION (SANS SUSFS) ====================
@@ -813,10 +793,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v7.3-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.4-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v7.3 (SukiSU-Ultra builtin, SANS SUSFS) ==="
+echo "=== BUILD TERMINÉ v7.4 (SukiSU-Ultra builtin, SANS SUSFS) ==="
 ls -lh output/
