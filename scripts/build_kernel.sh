@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
+
 # =============================================================================
 # V6.1 : SukiSU-Ultra (fork ShirkNeko, branche susfs-dev)
 #        Branche recommandée : SUSFS inclus + support non-GKI
