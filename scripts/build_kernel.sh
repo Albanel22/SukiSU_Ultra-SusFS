@@ -2,12 +2,13 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.0 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
+# V7.1 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
 #        Objectif : noyau qui boote + Manager qui détecte (root fonctionnel)
 #        SUSFS sera ajouté dans un V8 via le patch JackA1ltman
+#        V7.1 : + fix KSU_NO_PREINIT + fix access_ok KPM (4.19)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) ==="
+echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.1 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -268,7 +269,7 @@ for allowlist_path in ['drivers/kernelsu/policy/allowlist.c', 'drivers/kernelsu/
             return content
         modify_file(allowlist_path, transform_allowlist, f"allowlist.c dans {allowlist_path}")
 
-# 8. supercall/supercall.c (TWA_RESUME) — NOUVEAU
+# 8. supercall/supercall.c (TWA_RESUME)
 print("=== Correctif supercall/supercall.c ===")
 for supercall_path in ['drivers/kernelsu/supercall/supercall.c']:
     if os.path.exists(supercall_path):
@@ -285,7 +286,7 @@ for supercall_path in ['drivers/kernelsu/supercall/supercall.c']:
             return content
         modify_file(supercall_path, transform_supercall, f"supercall.c (TWA_RESUME) dans {supercall_path}")
 
-# 9. supercall/dispatch.c (includes manquants) — NOUVEAU
+# 9. supercall/dispatch.c (includes manquants)
 print("=== Correctif supercall/dispatch.c ===")
 for dispatch_path in ['drivers/kernelsu/supercall/dispatch.c']:
     if os.path.exists(dispatch_path):
@@ -481,6 +482,78 @@ out_free:
 
 with open(namespace_path, 'w') as f:
     f.write(content)
+
+# ==================== 3b. CORRECTIFS SukiSU-Ultra builtin (4.19) ====================
+print("")
+print("=== Correctifs SukiSU-Ultra builtin (KSU_NO_PREINIT + access_ok KPM) ===")
+
+# --- Fix 1 : KSU_NO_PREINIT redéfini (preinit.h) ---
+preinit_h = 'drivers/kernelsu/preinit/common/preinit.h'
+if os.path.exists(preinit_h):
+    with open(preinit_h, 'r') as f:
+        content = f.read()
+    if '#define KSU_NO_PREINIT' in content and '#ifndef KSU_NO_PREINIT' not in content:
+        content = content.replace(
+            '#define KSU_NO_PREINIT',
+            '#ifndef KSU_NO_PREINIT\n#define KSU_NO_PREINIT\n#endif'
+        )
+        with open(preinit_h, 'w') as f:
+            f.write(content)
+        print("  ✅ KSU_NO_PREINIT gardé dans preinit.h")
+    else:
+        print("  ✅ KSU_NO_PREINIT déjà gardé ou absent")
+else:
+    print(f"  ⚠️  {preinit_h} introuvable")
+
+# --- Fix 2 : access_ok 2 args → 3 args sur 4.19 (KPM) ---
+kpm_c = 'drivers/kernelsu/extension/kpm/kpm.c'
+if os.path.exists(kpm_c):
+    with open(kpm_c, 'r') as f:
+        content = f.read()
+    if 'access_ok(' in content and 'ksu_access_ok' not in content:
+        compat_macro = '''
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, (addr), (size))
+#else
+#define ksu_access_ok(addr, size) access_ok((addr), (size))
+#endif
+'''
+        # Insérer après le dernier #include
+        match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+        if match:
+            content = content[:match.end()] + compat_macro + content[match.end():]
+        else:
+            content = compat_macro + content
+
+        # Remplacer access_ok( par ksu_access_ok( SAUF dans la définition du macro
+        lines = content.split('\n')
+        in_macro = False
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('#define ksu_access_ok'):
+                in_macro = True
+                new_lines.append(line)
+                continue
+            if in_macro:
+                if stripped.endswith('\\'):
+                    new_lines.append(line)
+                    continue
+                else:
+                    in_macro = False
+                    new_lines.append(line)
+                    continue
+            new_lines.append(line.replace('access_ok(', 'ksu_access_ok('))
+        content = '\n'.join(new_lines)
+
+        with open(kpm_c, 'w') as f:
+            f.write(content)
+        print("  ✅ access_ok corrigé dans kpm.c (wrapper 3-args pour 4.19)")
+    else:
+        print("  ✅ kpm.c déjà patché ou pas d'access_ok")
+else:
+    print(f"  ⚠️  {kpm_c} introuvable")
+
 print("=== Correctifs terminés ===")
 
 PYEOF
@@ -498,7 +571,7 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
   echo "CONFIG_KSU=y"
   echo "CONFIG_KSU_MANUAL_HOOK=y"
   echo "# CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set"
-  echo "# CONFIG_KSU_SUSFS is not set"  # Désactivé : susfs.h absent
+  echo "# CONFIG_KSU_SUSFS is not set"
   echo "# CONFIG_KSU_TRACEPOINT_HOOK is not set"
   echo "CONFIG_KSU_LSM_SECURITY_HOOKS=y"
   echo "CONFIG_KSU_FEATURE_SULOG=y"
@@ -648,10 +721,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v7.0-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.1-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v7.0 (SukiSU-Ultra builtin, SANS SUSFS) ==="
+echo "=== BUILD TERMINÉ v7.1 (SukiSU-Ultra builtin, SANS SUSFS) ==="
 ls -lh output/
