@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V5.8 : SukiSU-Ultra (susfs-dev) intégration manuelle + tous les correctifs 4.19
-#        Branche susfs-dev clonée directement, plus de setup.sh
+# V6.1 : SukiSU-Ultra (fork ShirkNeko, branche susfs-dev)
+#        Branche recommandée : SUSFS inclus + support non-GKI
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (susfs-dev) pour noyau 4.19 ==="
+echo "=== Build SukiSU-Ultra (ShirkNeko/susfs-dev) pour noyau 4.19 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -28,44 +28,32 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION SukiSU-Ultra (susfs-dev) MANUELLE ====================
-echo "=== Intégration manuelle de SukiSU-Ultra (susfs-dev) ==="
+# ==================== 2. INTÉGRATION SukiSU-Ultra (ShirkNeko/susfs-dev) ====================
+echo "=== Intégration SukiSU-Ultra (ShirkNeko/susfs-dev avec SUSFS intégré) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-# 1. Cloner la branche susfs-dev directement
-git clone --depth=1 --branch susfs-dev https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/ksu-susfs
+# Utilisation du fork ShirkNeko avec la branche susfs-dev
+curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
 
-# 2. Vérifier que le dossier kernel existe
-if [ ! -d "/tmp/ksu-susfs/kernel" ]; then
-    echo "❌ Le dossier kernel est introuvable dans susfs-dev"
-    exit 1
+if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
+    echo "❌ Échec intégration SukiSU-Ultra"; exit 1
 fi
+echo "✅ SukiSU-Ultra (ShirkNeko/susfs-dev) intégré"
 
-# 3. Copier le code noyau dans drivers/kernelsu
-mkdir -p drivers/kernelsu
-cp -r /tmp/ksu-susfs/kernel/* drivers/kernelsu/
+if [ -d "drivers/kernelsu" ]; then
+    KSU_DIR="drivers/kernelsu"
+elif [ -d "KernelSU/kernel" ]; then
+    KSU_DIR="KernelSU/kernel"
+else
+    KSU_DIR="KernelSU"
+fi
+echo "KSU_DIR : $KSU_DIR"
 
-# 4. Vérifier que susfs.h est présent
-if find drivers/kernelsu -name "susfs.h" -path "*/linux/*" 2>/dev/null | grep -q .; then
-    echo "✅ Fichier susfs.h trouvé"
+if find . -name "susfs.h" -path "*/linux/*" 2>/dev/null | grep -q .; then
+    echo "✅ Fichier susfs.h trouvé (SUSFS intégré)"
 else
     echo "⚠️ susfs.h non trouvé, la compilation pourrait échouer"
 fi
-
-# 5. Intégrer dans le Makefile et Kconfig du noyau
-if ! grep -q "kernelsu" drivers/Makefile; then
-    echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-fi
-if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
-    sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-fi
-
-# 6. Supprimer le dossier temporaire
-rm -rf /tmp/ksu-susfs
-
-echo "✅ SukiSU-Ultra (susfs-dev) intégré manuellement"
-KSU_DIR="drivers/kernelsu"
-echo "KSU_DIR : $KSU_DIR"
 
 # ==================== 2b. NEUTRALISATION CHECK.MK ====================
 echo ""
@@ -484,7 +472,7 @@ PYEOF
 
 # ==================== 4. CONFIGURATION ====================
 echo ""
-echo "=== Configuration (SukiSU-Ultra susfs-dev + TAMPER_SYSCALL_TABLE) ==="
+echo "=== Configuration (SukiSU-Ultra ShirkNeko/susfs-dev + TAMPER_SYSCALL_TABLE) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -546,9 +534,9 @@ else
     exit 1
 fi
 
-# ==================== 7. COMPILATION KSUD (susfs-dev) ====================
+# ==================== 7. COMPILATION KSUD (ShirkNeko/susfs-dev) ====================
 echo ""
-echo "=== Compilation ksud (SukiSU-Ultra susfs-dev) ==="
+echo "=== Compilation ksud (SukiSU-Ultra ShirkNeko/susfs-dev) ==="
 cd "$GITHUB_WORKSPACE"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
@@ -561,7 +549,7 @@ export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-git clone --depth=1 --branch susfs-dev https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 --branch susfs-dev https://github.com/ShirkNeko/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
@@ -651,10 +639,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-susfs-dev-v5.8-boot.img
+cp final_boot.img output/SukiSU-Ultra-ShirkNeko-v6.1-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v5.8 (SukiSU-Ultra susfs-dev) ==="
+echo "=== BUILD TERMINÉ v6.1 (SukiSU-Ultra ShirkNeko/susfs-dev) ==="
 ls -lh output/
