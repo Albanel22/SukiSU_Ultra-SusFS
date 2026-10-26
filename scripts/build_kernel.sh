@@ -2,12 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.9 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
-#        V7.9 : Fix C robuste (sort SELINUX_HIDE du #ifdef CONFIG_KSU_SUSFS)
-#               + auto-stub ksu_selinux_hide_* (V7.8)
+# V7.10 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
+#         V7.10 : stubs HARDCODÉS (2 fonctions) au lieu de l'auto-stub buggé
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.9 ==="
+echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.10 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -311,7 +310,7 @@ for supercall_path in ['drivers/kernelsu/supercall/supercall.c']:
             return content
         modify_file(supercall_path, transform_supercall, f"supercall.c (TWA_RESUME) dans {supercall_path}")
 
-# 9. supercall/dispatch.c (includes manquants)
+# 9. supercall/dispatch.c
 print("=== Correctif supercall/dispatch.c ===")
 for dispatch_path in ['drivers/kernelsu/supercall/dispatch.c']:
     if os.path.exists(dispatch_path):
@@ -611,9 +610,9 @@ PYEOF
     fi
 fi
 
-# ==================== 3f. FIX C V7.9 : SORTIR SELINUX_HIDE DU #ifdef ====================
+# ==================== 3f. FIX C : SELINUX_HIDE inconditionnel (V7.9 approach) ====================
 echo ""
-echo "=== Fix C V7.9 : SELINUX_HIDE inconditionnel ==="
+echo "=== Fix C : SELINUX_HIDE inconditionnel ==="
 
 FEATURE_H=""
 for candidate in \
@@ -633,17 +632,13 @@ path = sys.argv[1]
 with open(path, 'r') as f:
     lines = f.readlines()
 
-print("  --- AVANT (L1-L25) ---")
-for i, line in enumerate(lines[:25], 1):
-    print(f"    L{i}: {line.rstrip()!r}")
-
 # Étape 1 : supprimer TOUTE ligne contenant KSU_FEATURE_SELINUX_HIDE = ...
 new_lines = []
-removed_count = 0
+removed = 0
 for line in lines:
     if re.search(r'KSU_FEATURE_SELINUX_HIDE\s*=', line):
         print(f"  🗑️  Supprimé : {line.rstrip()!r}")
-        removed_count += 1
+        removed += 1
         continue
     new_lines.append(line)
 
@@ -653,15 +648,12 @@ final_lines = []
 for line in new_lines:
     final_lines.append(line)
     if not inserted and re.search(r'KSU_FEATURE_MOUNT_HIDE\s*=\s*\d+\s*,', line):
-        # Détecter l'indentation
         m = re.match(r'^(\s*)', line)
         indent = m.group(1) if m else '\t'
         final_lines.append(f'{indent}KSU_FEATURE_SELINUX_HIDE = 17,\n')
         inserted = True
 
 if not inserted:
-    print("  ⚠️  KSU_FEATURE_MOUNT_HIDE non trouvé, fallback avant };")
-    # Fallback : avant };
     for i, line in enumerate(final_lines):
         if line.strip() == '};':
             final_lines.insert(i, '\tKSU_FEATURE_SELINUX_HIDE = 17,\n')
@@ -671,31 +663,15 @@ if not inserted:
 if inserted:
     with open(path, 'w') as f:
         f.writelines(final_lines)
-    print(f"  ✅ SELINUX_HIDE réinséré (supprimé {removed_count} ancienne(s) déclaration(s))")
+    print(f"  ✅ SELINUX_HIDE réinséré (supprimé {removed} ancienne(s) déclaration(s))")
 else:
     print("  ❌ Impossible d'insérer SELINUX_HIDE")
-
-with open(path, 'r') as f:
-    lines = f.readlines()
-
-print("  --- APRÈS (L1-L25) ---")
-for i, line in enumerate(lines[:25], 1):
-    print(f"    L{i}: {line.rstrip()!r}")
-
-# Vérification finale
-has_decl = any(re.search(r'KSU_FEATURE_SELINUX_HIDE\s*=\s*\d+', l) for l in lines)
-if has_decl:
-    print("  ✅ SELINUX_HIDE déclaré (inconditionnel)")
-else:
-    print("  ❌ SELINUX_HIDE toujours absent")
 PYEOF
-else
-    echo "  ❌ feature.h introuvable"
 fi
 
-# ==================== 3g. FIX E : auto-stub ksu_selinux_hide_* ====================
+# ==================== 3g. FIX E V7.10 : stubs HARDCODÉS (2 fonctions) ====================
 echo ""
-echo "=== Fix E : auto-stub ksu_selinux_hide_* dans ksud.c ==="
+echo "=== Fix E V7.10 : stubs hardcodés dans ksud.c ==="
 
 KSUD_C=""
 for candidate in \
@@ -709,59 +685,53 @@ done
 echo "  KSUD_C = $KSUD_C"
 
 if [ -n "$KSUD_C" ] && [ -f "$KSUD_C" ]; then
+    echo "  --- AVANT (5 premières lignes + occurrences) ---"
+    head -5 "$KSUD_C"
+    echo "  ---"
+    grep -n 'ksu_selinux_hide' "$KSUD_C" | head -10 || echo "  (aucune)"
+
     python3 - "$KSUD_C" << 'PYEOF'
-import sys, re, os
+import sys, re
 path = sys.argv[1]
 with open(path, 'r') as f:
     content = f.read()
 
-called = set(re.findall(r'\b(ksu_selinux_hide_[a-zA-Z0-9_]+)\s*\(', content))
-defined = set(re.findall(
-    r'(?:static\s+)?(?:inline\s+)?\w+\s+(ksu_selinux_hide_[a-zA-Z0-9_]+)\s*\([^)]*\)\s*\{',
-    content
-))
-
-ksu_dir = os.path.dirname(os.path.abspath(path))
-while ksu_dir and not (
-    os.path.exists(os.path.join(ksu_dir, 'kernel_compat.h')) or
-    os.path.basename(ksu_dir) == 'kernelsu'
-):
-    parent = os.path.dirname(ksu_dir)
-    if parent == ksu_dir:
-        break
-    ksu_dir = parent
-
-if ksu_dir and os.path.exists(ksu_dir):
-    for root, dirs, files in os.walk(ksu_dir, followlinks=True):
-        for f2 in files:
-            if f2.endswith('.h'):
-                try:
-                    with open(os.path.join(root, f2), 'r') as fh:
-                        hdr = fh.read()
-                    for fn in called:
-                        if re.search(r'\b(?:extern\s+)?\w+\s+' + re.escape(fn) + r'\s*\(', hdr):
-                            defined.add(fn)
-                except Exception:
-                    pass
-
-to_stub = sorted(called - defined)
-if not to_stub:
-    print("  ✅ Aucune fonction à stubber")
+# Vérifier si nos stubs existent déjà
+if 'static inline void ksu_selinux_hide_handle_post_fs_data(void) { }' in content:
+    print("  ✅ Stubs déjà présents")
 else:
-    stubs = "\n#ifndef CONFIG_KSU_SUSFS\n"
-    for fn in to_stub:
-        stubs += f"static inline void {fn}(void) {{ }}\n"
-    stubs += "#endif\n"
+    stubs = '''
+/* V7.10 : stubs SUSFS pour build sans CONFIG_KSU_SUSFS */
+#ifndef CONFIG_KSU_SUSFS
+static inline void ksu_selinux_hide_handle_post_fs_data(void) { }
+static inline void ksu_selinux_hide_handle_second_stage(void) { }
+#endif
+'''
 
+    # Insérer après le dernier #include
     matches = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', content))
     if matches:
         last = matches[-1]
         content = content[:last.end()] + stubs + content[last.end():]
     else:
         content = stubs + content
+
     with open(path, 'w') as f:
         f.write(content)
-    print(f"  ✅ Stubs ajoutés pour : {', '.join(to_stub)}")
+    print("  ✅ Stubs insérés (post_fs_data + second_stage)")
+
+# Recharger pour diagnostic
+with open(path, 'r') as f:
+    lines = f.readlines()
+
+print("  --- APRÈS (15 premières lignes) ---")
+for i, line in enumerate(lines[:15], 1):
+    print(f"    L{i}: {line.rstrip()!r}")
+
+print("  --- Occurrences ksu_selinux_hide ---")
+for i, line in enumerate(lines, 1):
+    if 'ksu_selinux_hide' in line:
+        print(f"    L{i}: {line.rstrip()!r}")
 PYEOF
 else
     echo "  ❌ ksud.c introuvable"
@@ -931,10 +901,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v7.9-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.10-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v7.9 (SukiSU-Ultra builtin, SANS SUSFS) ==="
+echo "=== BUILD TERMINÉ v7.10 (SukiSU-Ultra builtin, SANS SUSFS) ==="
 ls -lh output/
