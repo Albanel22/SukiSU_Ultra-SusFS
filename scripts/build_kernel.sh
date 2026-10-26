@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.7 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
-#        V7.7 : chemins explicites + find -L (symlink) + xargs exit 123
+# V7.9 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
+#        V7.9 : Fix C robuste (sort SELINUX_HIDE du #ifdef CONFIG_KSU_SUSFS)
+#               + auto-stub ksu_selinux_hide_* (V7.8)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.7 ==="
+echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.9 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -48,14 +49,12 @@ else
 fi
 echo "KSU_DIR : $KSU_DIR"
 
-# ==================== 2a. DIAGNOSTIC STRUCTURE (V7.7) ====================
+# ==================== 2a. DIAGNOSTIC STRUCTURE ====================
 echo ""
 echo "=== DIAGNOSTIC structure ==="
 ls -la drivers/ 2>&1 | grep -i kernelsu || echo "  (pas de kernelsu dans drivers/)"
 echo "--- readlink -f drivers/kernelsu ---"
 readlink -f drivers/kernelsu 2>&1 || echo "  (readlink échoué)"
-echo "--- find -L drivers/kernelsu -maxdepth 2 -type d ---"
-find -L drivers/kernelsu -maxdepth 2 -type d 2>&1 | head -15 || echo "  (find échoué)"
 echo "--- test chemins explicites ---"
 for p in \
     "drivers/kernelsu/extension/kpm/kpm.c" \
@@ -70,7 +69,7 @@ for p in \
 done
 echo ""
 
-# ==================== 2b. NEUTRALISATION CHECK.MK (find -L) ====================
+# ==================== 2b. NEUTRALISATION CHECK.MK ====================
 echo "=== Neutralisation check.mk (find -L) ==="
 for pattern in susfs_compat.mk inline_hook_check.mk manual_hook_check.mk tracepoint_hook_check.mk kprobe_check.mk; do
     FILES=$(find -L . -name "$pattern" -type f 2>/dev/null || true)
@@ -255,7 +254,7 @@ for mount_ns_path in ['drivers/kernelsu/infra/su_mount_ns.c', 'drivers/kernelsu/
             return content.replace('#include <uapi/linux/mount.h>', '#include <linux/mount.h>')
         modify_file(mount_ns_path, transform_mount_ns, f"su_mount_ns.c dans {mount_ns_path}")
 
-# 6. pkg_observer.c (handle_inode_event + susfs guard)
+# 6. pkg_observer.c
 print("=== Correctif pkg_observer.c ===")
 for pkg_observer_path in ['drivers/kernelsu/manager/pkg_observer.c', 'drivers/kernelsu/pkg_observer.c']:
     if os.path.exists(pkg_observer_path):
@@ -548,11 +547,10 @@ print("=== Correctifs Python terminés ===")
 
 PYEOF
 
-# ==================== 3e. FIX B V7.7 : access_ok (chemins explicites) ====================
+# ==================== 3e. FIX B : access_ok → ksu_access_ok ====================
 echo ""
-echo "=== Fix B V7.7 : access_ok → ksu_access_ok ==="
+echo "=== Fix B : access_ok → ksu_access_ok ==="
 
-# Chemins explicites (tirés des logs d'erreur)
 KPM_FILE=""
 for candidate in \
     "drivers/kernelsu/extension/kpm/kpm.c" \
@@ -562,28 +560,14 @@ for candidate in \
         break
     fi
 done
-# Fallback find -L
-if [ -z "$KPM_FILE" ]; then
-    KSU_REAL=$(readlink -f drivers/kernelsu 2>/dev/null || echo "drivers/kernelsu")
-    KPM_FILE=$(find "$KSU_REAL" -name 'kpm.c' -type f 2>/dev/null | head -1 || true)
-fi
 echo "  KPM_FILE = $KPM_FILE"
 
 if [ -n "$KPM_FILE" ] && [ -f "$KPM_FILE" ]; then
-    echo "  --- AVANT (lignes access_ok) ---"
-    grep -n 'access_ok' "$KPM_FILE" | head -5 || echo "  (aucune)"
-
-    # Protection : protéger les ksu_access_ok existants
     sed -i 's/ksu_access_ok(/__KSU_AOK__PH__(/g' "$KPM_FILE"
     sed -i 's/access_ok(/ksu_access_ok(/g' "$KPM_FILE"
     sed -i 's/__KSU_AOK__PH__(/ksu_access_ok(/g' "$KPM_FILE"
-
-    echo "  --- APRÈS (lignes access_ok) ---"
-    grep -n 'access_ok' "$KPM_FILE" | head -5 || echo "  (aucune)"
-
     if grep -qE '(^|[^_])access_ok\(' "$KPM_FILE"; then
         echo "  ⚠️  Des access_ok( nus restent"
-        grep -nE '(^|[^_])access_ok\(' "$KPM_FILE" | head -5
     else
         echo "  ✅ Aucun access_ok( nu restant"
     fi
@@ -591,7 +575,6 @@ else
     echo "  ❌ kpm.c introuvable"
 fi
 
-# kernel_compat.h : chemins explicites
 COMPAT_H=""
 for candidate in \
     "drivers/kernelsu/kernel_compat.h" \
@@ -601,15 +584,8 @@ for candidate in \
         break
     fi
 done
-if [ -z "$COMPAT_H" ]; then
-    KSU_REAL=$(readlink -f drivers/kernelsu 2>/dev/null || echo "drivers/kernelsu")
-    COMPAT_H=$(find "$KSU_REAL" -name 'kernel_compat.h' -type f 2>/dev/null | head -1 || true)
-fi
-echo "  COMPAT_H = $COMPAT_H"
-
 if [ -n "$COMPAT_H" ] && [ -f "$COMPAT_H" ]; then
     if ! grep -q 'define ksu_access_ok' "$COMPAT_H"; then
-        echo "  Ajout macro ksu_access_ok dans $COMPAT_H"
         python3 - "$COMPAT_H" << 'PYEOF'
 import sys, re
 path = sys.argv[1]
@@ -632,14 +608,12 @@ with open(path, 'w') as f:
     f.write(content)
 print("  ✅ ksu_access_ok macro ajouté")
 PYEOF
-    else
-        echo "  ✅ ksu_access_ok macro déjà présent"
     fi
 fi
 
-# ==================== 3f. FIX C V7.7 : KSU_FEATURE_SELINUX_HIDE (chemins explicites, pas de xargs) ====================
+# ==================== 3f. FIX C V7.9 : SORTIR SELINUX_HIDE DU #ifdef ====================
 echo ""
-echo "=== Fix C V7.7 : KSU_FEATURE_SELINUX_HIDE ==="
+echo "=== Fix C V7.9 : SELINUX_HIDE inconditionnel ==="
 
 FEATURE_H=""
 for candidate in \
@@ -650,14 +624,6 @@ for candidate in \
         break
     fi
 done
-if [ -z "$FEATURE_H" ]; then
-    KSU_REAL=$(readlink -f drivers/kernelsu 2>/dev/null || echo "drivers/kernelsu")
-    FEATURE_H=$(find "$KSU_REAL" -name 'feature.h' -path '*uapi*' -type f 2>/dev/null | head -1 || true)
-fi
-if [ -z "$FEATURE_H" ]; then
-    KSU_REAL=$(readlink -f drivers/kernelsu 2>/dev/null || echo "drivers/kernelsu")
-    FEATURE_H=$(find "$KSU_REAL" -name 'feature.h' -type f 2>/dev/null | head -1 || true)
-fi
 echo "  FEATURE_H = $FEATURE_H"
 
 if [ -n "$FEATURE_H" ] && [ -f "$FEATURE_H" ]; then
@@ -665,55 +631,71 @@ if [ -n "$FEATURE_H" ] && [ -f "$FEATURE_H" ]; then
 import sys, re
 path = sys.argv[1]
 with open(path, 'r') as f:
-    content = f.read()
+    lines = f.readlines()
 
-print("  --- AVANT ---")
-for i, line in enumerate(content.split('\n'), 1):
-    if 'KSU_FEATURE' in line or line.strip() == '};':
-        print(f"    L{i}: {line!r}")
+print("  --- AVANT (L1-L25) ---")
+for i, line in enumerate(lines[:25], 1):
+    print(f"    L{i}: {line.rstrip()!r}")
 
-if 'KSU_FEATURE_SELINUX_HIDE' in content:
-    print("  ✅ KSU_FEATURE_SELINUX_HIDE déjà présent")
+# Étape 1 : supprimer TOUTE ligne contenant KSU_FEATURE_SELINUX_HIDE = ...
+new_lines = []
+removed_count = 0
+for line in lines:
+    if re.search(r'KSU_FEATURE_SELINUX_HIDE\s*=', line):
+        print(f"  🗑️  Supprimé : {line.rstrip()!r}")
+        removed_count += 1
+        continue
+    new_lines.append(line)
+
+# Étape 2 : ajouter après KSU_FEATURE_MOUNT_HIDE = N,
+inserted = False
+final_lines = []
+for line in new_lines:
+    final_lines.append(line)
+    if not inserted and re.search(r'KSU_FEATURE_MOUNT_HIDE\s*=\s*\d+\s*,', line):
+        # Détecter l'indentation
+        m = re.match(r'^(\s*)', line)
+        indent = m.group(1) if m else '\t'
+        final_lines.append(f'{indent}KSU_FEATURE_SELINUX_HIDE = 17,\n')
+        inserted = True
+
+if not inserted:
+    print("  ⚠️  KSU_FEATURE_MOUNT_HIDE non trouvé, fallback avant };")
+    # Fallback : avant };
+    for i, line in enumerate(final_lines):
+        if line.strip() == '};':
+            final_lines.insert(i, '\tKSU_FEATURE_SELINUX_HIDE = 17,\n')
+            inserted = True
+            break
+
+if inserted:
+    with open(path, 'w') as f:
+        f.writelines(final_lines)
+    print(f"  ✅ SELINUX_HIDE réinséré (supprimé {removed_count} ancienne(s) déclaration(s))")
 else:
-    matched = False
-    new_content = re.sub(
-        r'(KSU_FEATURE_MOUNT_HIDE\s*=\s*\d+\s*,)',
-        r'\1\n\tKSU_FEATURE_SELINUX_HIDE = 17,',
-        content, count=1
-    )
-    if new_content != content:
-        content = new_content
-        matched = True
-        print("  ✅ Ajouté après KSU_FEATURE_MOUNT_HIDE")
+    print("  ❌ Impossible d'insérer SELINUX_HIDE")
 
-    if not matched:
-        lines = content.split('\n')
-        for i, line in enumerate(lines):
-            if line.strip() == '};':
-                lines.insert(i, '\tKSU_FEATURE_SELINUX_HIDE = 17,')
-                content = '\n'.join(lines)
-                matched = True
-                print("  ✅ Ajouté avant }; (fallback)")
-                break
+with open(path, 'r') as f:
+    lines = f.readlines()
 
-    if matched:
-        with open(path, 'w') as f:
-            f.write(content)
-    else:
-        print("  ❌ Aucun pattern n'a matché")
+print("  --- APRÈS (L1-L25) ---")
+for i, line in enumerate(lines[:25], 1):
+    print(f"    L{i}: {line.rstrip()!r}")
 
-print("  --- APRÈS ---")
-for i, line in enumerate(content.split('\n'), 1):
-    if 'KSU_FEATURE' in line or line.strip() == '};':
-        print(f"    L{i}: {line!r}")
+# Vérification finale
+has_decl = any(re.search(r'KSU_FEATURE_SELINUX_HIDE\s*=\s*\d+', l) for l in lines)
+if has_decl:
+    print("  ✅ SELINUX_HIDE déclaré (inconditionnel)")
+else:
+    print("  ❌ SELINUX_HIDE toujours absent")
 PYEOF
 else
     echo "  ❌ feature.h introuvable"
 fi
 
-# ==================== 3g. FIX E V7.7 : stubs SUSFS dans ksud.c ====================
+# ==================== 3g. FIX E : auto-stub ksu_selinux_hide_* ====================
 echo ""
-echo "=== Fix E V7.7 : stubs SUSFS dans ksud.c ==="
+echo "=== Fix E : auto-stub ksu_selinux_hide_* dans ksud.c ==="
 
 KSUD_C=""
 for candidate in \
@@ -724,51 +706,68 @@ for candidate in \
         break
     fi
 done
-if [ -z "$KSUD_C" ]; then
-    KSU_REAL=$(readlink -f drivers/kernelsu 2>/dev/null || echo "drivers/kernelsu")
-    KSUD_C=$(find "$KSU_REAL" -name 'ksud.c' -path '*runtime*' -type f 2>/dev/null | head -1 || true)
-fi
 echo "  KSUD_C = $KSUD_C"
 
 if [ -n "$KSUD_C" ] && [ -f "$KSUD_C" ]; then
-    echo "  --- AVANT (lignes avec selinux_hide) ---"
-    grep -n 'ksu_selinux_hide' "$KSUD_C" | head -5 || echo "  (aucune)"
-
-    if ! grep -q 'static inline void ksu_selinux_hide_handle_post_fs_data' "$KSUD_C"; then
-        python3 - "$KSUD_C" << 'PYEOF'
-import sys, re
+    python3 - "$KSUD_C" << 'PYEOF'
+import sys, re, os
 path = sys.argv[1]
 with open(path, 'r') as f:
     content = f.read()
 
-stubs = '''
-#ifndef CONFIG_KSU_SUSFS
-static inline void ksu_selinux_hide_handle_post_fs_data(void) { }
-static inline void ksu_selinux_hide_handle_second_stage(void) { }
-#endif
-'''
+called = set(re.findall(r'\b(ksu_selinux_hide_[a-zA-Z0-9_]+)\s*\(', content))
+defined = set(re.findall(
+    r'(?:static\s+)?(?:inline\s+)?\w+\s+(ksu_selinux_hide_[a-zA-Z0-9_]+)\s*\([^)]*\)\s*\{',
+    content
+))
 
-match = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', content))
-if match:
-    last = match[-1]
-    content = content[:last.end()] + stubs + content[last.end():]
+ksu_dir = os.path.dirname(os.path.abspath(path))
+while ksu_dir and not (
+    os.path.exists(os.path.join(ksu_dir, 'kernel_compat.h')) or
+    os.path.basename(ksu_dir) == 'kernelsu'
+):
+    parent = os.path.dirname(ksu_dir)
+    if parent == ksu_dir:
+        break
+    ksu_dir = parent
+
+if ksu_dir and os.path.exists(ksu_dir):
+    for root, dirs, files in os.walk(ksu_dir, followlinks=True):
+        for f2 in files:
+            if f2.endswith('.h'):
+                try:
+                    with open(os.path.join(root, f2), 'r') as fh:
+                        hdr = fh.read()
+                    for fn in called:
+                        if re.search(r'\b(?:extern\s+)?\w+\s+' + re.escape(fn) + r'\s*\(', hdr):
+                            defined.add(fn)
+                except Exception:
+                    pass
+
+to_stub = sorted(called - defined)
+if not to_stub:
+    print("  ✅ Aucune fonction à stubber")
 else:
-    content = stubs + content
-with open(path, 'w') as f:
-    f.write(content)
-print("  ✅ Stubs SUSFS ajoutés dans ksud.c")
-PYEOF
-    else
-        echo "  ✅ Stubs SUSFS déjà présents"
-    fi
+    stubs = "\n#ifndef CONFIG_KSU_SUSFS\n"
+    for fn in to_stub:
+        stubs += f"static inline void {fn}(void) {{ }}\n"
+    stubs += "#endif\n"
 
-    echo "  --- APRÈS (lignes avec selinux_hide) ---"
-    grep -n 'ksu_selinux_hide' "$KSUD_C" | head -5 || echo "  (aucune)"
+    matches = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', content))
+    if matches:
+        last = matches[-1]
+        content = content[:last.end()] + stubs + content[last.end():]
+    else:
+        content = stubs + content
+    with open(path, 'w') as f:
+        f.write(content)
+    print(f"  ✅ Stubs ajoutés pour : {', '.join(to_stub)}")
+PYEOF
 else
     echo "  ❌ ksud.c introuvable"
 fi
 
-# ==================== 4. CONFIGURATION (SANS SUSFS) ====================
+# ==================== 4. CONFIGURATION ====================
 echo ""
 echo "=== Configuration (SukiSU-Ultra builtin, SANS SUSFS) ==="
 export ARCH=arm64; export SUBARCH=arm64
@@ -932,10 +931,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v7.7-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.9-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v7.7 (SukiSU-Ultra builtin, SANS SUSFS) ==="
+echo "=== BUILD TERMINÉ v7.9 (SukiSU-Ultra builtin, SANS SUSFS) ==="
 ls -lh output/
