@@ -2,12 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.11 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
-#         V7.11 : retirer wraps rules.c et sepolicy.c (fix apply_kernelsu_rules
-#                 et handle_sepolicy undefined)
+# V7.12 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
+#         V7.12 : wrap sepolicy.c 5.0+ + macro handle_sepolicy + rules.c unused
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.11 ==="
+echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.12 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -39,14 +38,7 @@ if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
     echo "❌ Échec intégration SukiSU-Ultra"; exit 1
 fi
 echo "✅ SukiSU-Ultra (builtin) intégré"
-
-if [ -d "drivers/kernelsu" ]; then
-    KSU_DIR="drivers/kernelsu"
-elif [ -d "KernelSU/kernel" ]; then
-    KSU_DIR="KernelSU/kernel"
-else
-    KSU_DIR="KernelSU"
-fi
+KSU_DIR="drivers/kernelsu"
 echo "KSU_DIR : $KSU_DIR"
 
 # ==================== 2a. DIAGNOSTIC STRUCTURE ====================
@@ -61,25 +53,16 @@ for p in \
     "drivers/kernelsu/runtime/ksud.c" \
     "drivers/kernelsu/selinux/rules.c" \
     "drivers/kernelsu/selinux/sepolicy.c" \
-    "drivers/kernelsu/selinux/selinux_hide.c"; do
-    if [ -f "$p" ]; then
-        echo "  ✅ $p"
-    else
-        echo "  ❌ $p"
-    fi
+    "drivers/kernelsu/supercall/dispatch.c"; do
+    if [ -f "$p" ]; then echo "  ✅ $p"; else echo "  ❌ $p"; fi
 done
-echo ""
 
 # ==================== 2b. NEUTRALISATION CHECK.MK ====================
+echo ""
 echo "=== Neutralisation check.mk (find -L) ==="
 for pattern in susfs_compat.mk inline_hook_check.mk manual_hook_check.mk tracepoint_hook_check.mk kprobe_check.mk; do
     FILES=$(find -L . -name "$pattern" -type f 2>/dev/null || true)
-    if [ -n "$FILES" ]; then
-        for f in $FILES; do
-            sed -i 's/\$(error/\$(warning/g' "$f"
-            echo "  neutralisé: $f"
-        done
-    fi
+    [ -n "$FILES" ] && for f in $FILES; do sed -i 's/\$(error/\$(warning/g' "$f"; done
 done
 
 # ==================== 2c. NETTOYAGE UNICODE ====================
@@ -101,8 +84,7 @@ for root, dirs, files in os.walk('.', followlinks=True):
                 content = filepath.read_text(encoding='utf-8', errors='ignore')
                 original = content
                 for uchar in UNICODE_SPACES:
-                    if uchar in content:
-                        content = content.replace(uchar, ' ')
+                    if uchar in content: content = content.replace(uchar, ' ')
                 if content != original:
                     filepath.write_text(content, encoding='utf-8')
                     count += 1
@@ -138,15 +120,13 @@ import os
 
 def modify_file(path, transform_func, description):
     if not os.path.exists(path):
-        print(f"  ⚠️  {description} : fichier {path} introuvable, ignoré")
+        print(f"  ⚠️  {description} : {path} introuvable")
         return False
     try:
-        with open(path, 'r') as f:
-            content = f.read()
+        with open(path, 'r') as f: content = f.read()
         new_content = transform_func(content)
         if new_content != content:
-            with open(path, 'w') as f:
-                f.write(new_content)
+            with open(path, 'w') as f: f.write(new_content)
             print(f"  ✅ {description}")
             return True
         else:
@@ -158,249 +138,183 @@ def modify_file(path, transform_func, description):
 
 # 1. Stub static_call.h
 print("=== Stub static_call.h ===")
-static_call_h_path = 'include/linux/static_call.h'
-if not os.path.exists(static_call_h_path):
-    static_call_content = '''#ifndef _LINUX_STATIC_CALL_H
+sc_path = 'include/linux/static_call.h'
+if not os.path.exists(sc_path):
+    with open(sc_path, 'w') as f:
+        f.write('''#ifndef _LINUX_STATIC_CALL_H
 #define _LINUX_STATIC_CALL_H
 #define static_call(name) (name##_static_call)
 #define static_call_cond(name) (name##_static_call)
 #define static_call_update(name, func) do { } while (0)
 #define static_call_query(name) (name##_static_call)
 #endif
-'''
-    with open(static_call_h_path, 'w') as f:
-        f.write(static_call_content)
-    print("  ✅ include/linux/static_call.h créé")
-else:
-    print("  ✅ include/linux/static_call.h existe déjà")
+''')
+    print("  ✅ static_call.h créé")
 
 # 2. MODULE_IMPORT_NS
-print("=== Correctif MODULE_IMPORT_NS ===")
-for ksu_c_path in ['drivers/kernelsu/ksu.c', 'drivers/kernelsu/ksu_main.c', 'drivers/kernelsu/core/init.c']:
-    if os.path.exists(ksu_c_path):
-        def transform_import_ns(content):
+print("=== MODULE_IMPORT_NS ===")
+for p in ['drivers/kernelsu/ksu.c', 'drivers/kernelsu/ksu_main.c', 'drivers/kernelsu/core/init.c']:
+    if os.path.exists(p):
+        def tx(content):
             if 'MODULE_IMPORT_NS' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)' not in content:
-                old_line = 'MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);'
-                new_block = '''#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
-MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
-#endif'''
-                return content.replace(old_line, new_block)
+                return content.replace(
+                    'MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);',
+                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)\nMODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n#endif'
+                )
             return content
-        modify_file(ksu_c_path, transform_import_ns, f"MODULE_IMPORT_NS dans {ksu_c_path}")
+        modify_file(p, tx, f"MODULE_IMPORT_NS {p}")
 
 # 3. file_wrapper.c
-print("=== Correctif file_wrapper.c ===")
-for file_path in ['drivers/kernelsu/infra/file_wrapper.c', 'drivers/kernelsu/file_wrapper.c']:
-    if os.path.exists(file_path):
-        def transform_file_wrapper(content):
+print("=== file_wrapper.c ===")
+for p in ['drivers/kernelsu/infra/file_wrapper.c', 'drivers/kernelsu/file_wrapper.c']:
+    if os.path.exists(p):
+        def tx(content):
             if 'iopoll' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)' not in content:
-                content = content.replace(
-                    'return orig->f_op->iopoll(kiocb, spin);',
-                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n        return orig->f_op->iopoll(kiocb, spin);\n#else\n        return -EOPNOTSUPP;\n#endif'
-                )
-                content = content.replace(
-                    'p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;',
-                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\n#endif'
-                )
+                content = content.replace('return orig->f_op->iopoll(kiocb, spin);',
+                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n        return orig->f_op->iopoll(kiocb, spin);\n#else\n        return -EOPNOTSUPP;\n#endif')
+                content = content.replace('p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;',
+                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\n#endif')
             if 'remap_file_range' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)' not in content:
-                content = content.replace(
-                    'if (remap_flags & REMAP_FILE_DEDUP) {',
-                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n    if (remap_flags & REMAP_FILE_DEDUP) {\n#else\n    if (0) {\n#endif'
-                )
-                content = content.replace(
-                    'return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);',
-                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n        return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif'
-                )
-                content = content.replace(
-                    'return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);',
-                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n        return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif'
-                )
-                content = content.replace(
-                    'p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;',
-                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n#endif'
-                )
+                content = content.replace('if (remap_flags & REMAP_FILE_DEDUP) {',
+                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n    if (remap_flags & REMAP_FILE_DEDUP) {\n#else\n    if (0) {\n#endif')
+                content = content.replace('return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);',
+                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n        return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif')
+                content = content.replace('return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);',
+                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n        return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif')
+                content = content.replace('p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;',
+                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n#endif')
             if 'struct file *orig = data->orig;' in content:
-                content = content.replace(
-                    'struct file *orig = data->orig;',
-                    'struct file *orig __maybe_unused = data->orig;'
-                )
+                content = content.replace('struct file *orig = data->orig;', 'struct file *orig __maybe_unused = data->orig;')
             return content
-        modify_file(file_path, transform_file_wrapper, f"file_wrapper.c dans {file_path}")
+        modify_file(p, tx, f"file_wrapper.c {p}")
 
 # 4. seccomp_cache.c
-print("=== Correctif seccomp_cache.c ===")
-for seccomp_path in ['drivers/kernelsu/infra/seccomp_cache.c', 'drivers/kernelsu/seccomp_cache.c']:
-    if os.path.exists(seccomp_path):
-        def transform_seccomp(content):
+print("=== seccomp_cache.c ===")
+for p in ['drivers/kernelsu/infra/seccomp_cache.c', 'drivers/kernelsu/seccomp_cache.c']:
+    if os.path.exists(p):
+        def tx(content):
             if 'SECCOMP_ARCH_NATIVE_NR' not in content or '#ifndef SECCOMP_ARCH_NATIVE_NR' not in content:
-                fallback_defs = '''
-#ifndef SECCOMP_ARCH_NATIVE_NR
-#define SECCOMP_ARCH_NATIVE_NR NR_syscalls
-#endif
-#ifndef SECCOMP_ARCH_COMPAT_NR
-#define SECCOMP_ARCH_COMPAT_NR NR_syscalls
-#endif
-'''
-                match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
-                if match:
-                    return content[:match.end()] + fallback_defs + content[match.end():]
+                fb = '\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR NR_syscalls\n#endif\n#ifndef SECCOMP_ARCH_COMPAT_NR\n#define SECCOMP_ARCH_COMPAT_NR NR_syscalls\n#endif\n'
+                m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+                if m: return content[:m.end()] + fb + content[m.end():]
             return content
-        modify_file(seccomp_path, transform_seccomp, f"seccomp_cache.c dans {seccomp_path}")
+        modify_file(p, tx, f"seccomp_cache.c {p}")
 
-# 5. su_mount_ns.c include
-print("=== Correctif su_mount_ns.c ===")
-for mount_ns_path in ['drivers/kernelsu/infra/su_mount_ns.c', 'drivers/kernelsu/su_mount_ns.c']:
-    if os.path.exists(mount_ns_path):
-        def transform_mount_ns(content):
-            return content.replace('#include <uapi/linux/mount.h>', '#include <linux/mount.h>')
-        modify_file(mount_ns_path, transform_mount_ns, f"su_mount_ns.c dans {mount_ns_path}")
+# 5. su_mount_ns.c
+print("=== su_mount_ns.c ===")
+for p in ['drivers/kernelsu/infra/su_mount_ns.c', 'drivers/kernelsu/su_mount_ns.c']:
+    if os.path.exists(p):
+        def tx(c): return c.replace('#include <uapi/linux/mount.h>', '#include <linux/mount.h>')
+        modify_file(p, tx, f"su_mount_ns.c {p}")
 
 # 6. pkg_observer.c
-print("=== Correctif pkg_observer.c ===")
-for pkg_observer_path in ['drivers/kernelsu/manager/pkg_observer.c', 'drivers/kernelsu/pkg_observer.c']:
-    if os.path.exists(pkg_observer_path):
-        def transform_pkg_observer(content):
+print("=== pkg_observer.c ===")
+for p in ['drivers/kernelsu/manager/pkg_observer.c', 'drivers/kernelsu/pkg_observer.c']:
+    if os.path.exists(p):
+        def tx(content):
             if '.handle_inode_event = ksu_handle_inode_event,' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' not in content:
-                content = content.replace(
-                    '.handle_inode_event = ksu_handle_inode_event,',
-                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n\t.handle_inode_event = ksu_handle_inode_event,\n#endif'
-                )
+                content = content.replace('.handle_inode_event = ksu_handle_inode_event,',
+                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n\t.handle_inode_event = ksu_handle_inode_event,\n#endif')
             if 'susfs_parse_priority_app_strings' in content and '#ifdef CONFIG_KSU_SUSFS' not in content:
-                content = re.sub(
-                    r'(\s*)susfs_parse_priority_app_strings\(\);',
-                    r'\1#ifdef CONFIG_KSU_SUSFS\n\1susfs_parse_priority_app_strings();\n\1#endif',
-                    content
-                )
+                content = re.sub(r'(\s*)susfs_parse_priority_app_strings\(\);',
+                    r'\1#ifdef CONFIG_KSU_SUSFS\n\1susfs_parse_priority_app_strings();\n\1#endif', content)
             return content
-        modify_file(pkg_observer_path, transform_pkg_observer, f"pkg_observer.c dans {pkg_observer_path}")
+        modify_file(p, tx, f"pkg_observer.c {p}")
 
 # 7. allowlist.c
-print("=== Correctif allowlist.c ===")
-for allowlist_path in ['drivers/kernelsu/policy/allowlist.c', 'drivers/kernelsu/allowlist.c']:
-    if os.path.exists(allowlist_path):
-        def transform_allowlist(content):
+print("=== allowlist.c ===")
+for p in ['drivers/kernelsu/policy/allowlist.c', 'drivers/kernelsu/allowlist.c']:
+    if os.path.exists(p):
+        def tx(content):
             if 'TWA_RESUME' in content and '#ifndef TWA_RESUME' not in content:
-                fallback_def = '''
-#ifndef TWA_RESUME
-#define TWA_RESUME 1
-#endif
-'''
-                match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
-                if match:
-                    content = content[:match.end()] + fallback_def + content[match.end():]
+                fb = '\n#ifndef TWA_RESUME\n#define TWA_RESUME 1\n#endif\n'
+                m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+                if m: content = content[:m.end()] + fb + content[m.end():]
             if '#include <linux/sched/task.h>' not in content:
-                match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
-                if match:
-                    content = content[:match.end()] + '#include <linux/sched/task.h>\n' + content[match.end():]
+                m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+                if m: content = content[:m.end()] + '#include <linux/sched/task.h>\n' + content[m.end():]
             return content
-        modify_file(allowlist_path, transform_allowlist, f"allowlist.c dans {allowlist_path}")
+        modify_file(p, tx, f"allowlist.c {p}")
 
-# 8. supercall/supercall.c (TWA_RESUME)
-print("=== Correctif supercall/supercall.c ===")
-for supercall_path in ['drivers/kernelsu/supercall/supercall.c']:
-    if os.path.exists(supercall_path):
-        def transform_supercall(content):
+# 8. supercall.c
+print("=== supercall/supercall.c ===")
+for p in ['drivers/kernelsu/supercall/supercall.c']:
+    if os.path.exists(p):
+        def tx(content):
             if 'TWA_RESUME' in content and '#ifndef TWA_RESUME' not in content:
-                fallback_def = '''
-#ifndef TWA_RESUME
-#define TWA_RESUME 1
-#endif
-'''
-                match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
-                if match:
-                    return content[:match.end()] + fallback_def + content[match.end():]
+                fb = '\n#ifndef TWA_RESUME\n#define TWA_RESUME 1\n#endif\n'
+                m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+                if m: return content[:m.end()] + fb + content[m.end():]
             return content
-        modify_file(supercall_path, transform_supercall, f"supercall.c (TWA_RESUME) dans {supercall_path}")
+        modify_file(p, tx, f"supercall.c {p}")
 
-# 9. supercall/dispatch.c
-print("=== Correctif supercall/dispatch.c ===")
-for dispatch_path in ['drivers/kernelsu/supercall/dispatch.c']:
-    if os.path.exists(dispatch_path):
-        def transform_dispatch(content):
-            includes_to_add = [
-                '#include <linux/sched.h>',
-                '#include <linux/sched/task.h>',
-                '#include <linux/init_task.h>'
-            ]
-            for inc in includes_to_add:
+# 9. dispatch.c includes
+print("=== dispatch.c ===")
+for p in ['drivers/kernelsu/supercall/dispatch.c']:
+    if os.path.exists(p):
+        def tx(content):
+            for inc in ['#include <linux/sched.h>', '#include <linux/sched/task.h>', '#include <linux/init_task.h>']:
                 if inc not in content:
-                    match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
-                    if match:
-                        content = content[:match.end()] + inc + '\n' + content[match.end():]
+                    m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
+                    if m: content = content[:m.end()] + inc + '\n' + content[m.end():]
             return content
-        modify_file(dispatch_path, transform_dispatch, f"dispatch.c dans {dispatch_path}")
+        modify_file(p, tx, f"dispatch.c {p}")
 
 # 10. app_profile.c
-print("=== Correctif app_profile.c ===")
-for app_profile_path in ['drivers/kernelsu/policy/app_profile.c', 'drivers/kernelsu/app_profile.c']:
-    if os.path.exists(app_profile_path):
-        def transform_app_profile(content):
-            old_line = 'atomic_set(&current->seccomp.filter_count, 0);'
-            new_block = '''#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
-	atomic_set(&current->seccomp.filter_count, 0);
-#endif'''
-            if old_line in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' not in content:
-                return content.replace(old_line, new_block)
+print("=== app_profile.c ===")
+for p in ['drivers/kernelsu/policy/app_profile.c', 'drivers/kernelsu/app_profile.c']:
+    if os.path.exists(p):
+        def tx(content):
+            old = 'atomic_set(&current->seccomp.filter_count, 0);'
+            new = '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n\tatomic_set(&current->seccomp.filter_count, 0);\n#endif'
+            if old in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)' not in content:
+                return content.replace(old, new)
             return content
-        modify_file(app_profile_path, transform_app_profile, f"app_profile.c dans {app_profile_path}")
+        modify_file(p, tx, f"app_profile.c {p}")
 
-# NOTE V7.11 : Fix 11 (rules.c wrap 5.7.0) SUPPRIMÉ
-# NOTE V7.11 : Fix 12 (sepolicy.c wrap 5.10.0) SUPPRIMÉ
-# Fix 13 (selinux_hide.c) conservé ci-dessous
-
-# 13. selinux_hide.c (conservé)
-print("=== Correctif selinux_hide.c (conservé) ===")
-for selinux_hide_path in ['drivers/kernelsu/feature/selinux_hide.c', 'drivers/kernelsu/selinux_hide.c']:
-    if os.path.exists(selinux_hide_path):
-        def transform_selinux_hide(content):
+# 11. selinux_hide.c (conservé)
+print("=== selinux_hide.c ===")
+for p in ['drivers/kernelsu/feature/selinux_hide.c', 'drivers/kernelsu/selinux_hide.c']:
+    if os.path.exists(p):
+        def tx(content):
             if '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)' not in content:
                 lines = content.split('\n')
                 insert_pos = 0
                 for i, line in enumerate(lines):
                     if line.strip() and not line.strip().startswith('//') and not line.strip().startswith('/*') and not line.strip().startswith('*') and not line.strip().startswith('#include'):
-                        insert_pos = i
-                        break
+                        insert_pos = i; break
                 lines.insert(insert_pos, '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)')
                 lines.append('#endif // LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)')
                 return '\n'.join(lines)
             return content
-        modify_file(selinux_hide_path, transform_selinux_hide, f"selinux_hide.c dans {selinux_hide_path}")
+        modify_file(p, tx, f"selinux_hide.c {p}")
 
-# 14. extension/cpu_spoof.c
-print("=== Correctif extension/cpu_spoof.c ===")
-for cpu_spoof_path in ['drivers/kernelsu/extension/cpu_spoof.c']:
-    if os.path.exists(cpu_spoof_path):
-        def transform_cpu_spoof(content):
+# 12. cpu_spoof.c
+print("=== cpu_spoof.c ===")
+for p in ['drivers/kernelsu/extension/cpu_spoof.c']:
+    if os.path.exists(p):
+        def tx(content):
             if 'vdso_clock_mode' in content and '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)' not in content:
-                old_block = '''(*curr_cs_ptr)->vdso_clock_mode ='''
-                new_block = '''#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
-                        (*curr_cs_ptr)->vdso_clock_mode ='''
-                content = content.replace(old_block, new_block)
-                content = re.sub(
-                    r'(#if LINUX_VERSION_CODE >= KERNEL_VERSION\(5, 7, 0\)\n\s*\(\*curr_cs_ptr\)->vdso_clock_mode\s*=\s*[^;]+;)',
-                    r'\1\n#endif',
-                    content
-                )
-                print("  ✅ vdso_clock_mode conditionnel")
+                content = content.replace('(*curr_cs_ptr)->vdso_clock_mode =',
+                    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)\n                        (*curr_cs_ptr)->vdso_clock_mode =')
+                content = re.sub(r'(#if LINUX_VERSION_CODE >= KERNEL_VERSION\(5, 7, 0\)\n\s*\(\*curr_cs_ptr\)->vdso_clock_mode\s*=\s*[^;]+;)',
+                    r'\1\n#endif', content)
             return content
-        modify_file(cpu_spoof_path, transform_cpu_spoof, f"cpu_spoof.c dans {cpu_spoof_path}")
+        modify_file(p, tx, f"cpu_spoof.c {p}")
 
-# 15. sulog/event.c
-print("=== Correctif sulog/event.c ===")
-for event_path in ['drivers/kernelsu/sulog/event.c']:
-    if os.path.exists(event_path):
-        def transform_event(content):
-            return content.replace('#include <linux/minmax.h>', '#include <linux/kernel.h>')
-        modify_file(event_path, transform_event, f"sulog/event.c dans {event_path}")
+# 13. sulog/event.c
+print("=== sulog/event.c ===")
+for p in ['drivers/kernelsu/sulog/event.c']:
+    if os.path.exists(p):
+        def tx(c): return c.replace('#include <linux/minmax.h>', '#include <linux/kernel.h>')
+        modify_file(p, tx, f"sulog/event.c {p}")
 
-# 16. Backports path_umount + path_mount
-print("=== Backport path_umount et path_mount ===")
-namespace_path = 'fs/namespace.c'
-with open(namespace_path, 'r') as f:
-    content = f.read()
+# 14. Backports path_umount + path_mount
+print("=== path_umount/path_mount ===")
+with open('fs/namespace.c', 'r') as f: content = f.read()
 
 if 'int path_umount(struct path *path, int flags)' not in content:
-    backport_umount = '''
+    backport = '''
 #ifdef CONFIG_KSU
 static int can_umount(const struct path *path, int flags)
 {
@@ -433,11 +347,11 @@ int path_umount(struct path *path, int flags)
 }
 #endif
 '''
-    content = re.sub(r'(int ksys_umount\(char __user \*name, int flags\))', backport_umount + r'\1', content, count=1)
+    content = re.sub(r'(int ksys_umount\(char __user \*name, int flags\))', backport + r'\1', content, count=1)
     print("  ✅ path_umount backporté")
 
 if 'int path_mount(' not in content:
-    backport_mount = '''
+    bm = '''
 #ifdef CONFIG_KSU
 int path_mount(const char *dev_name, struct path *path,
                const char *type_page, unsigned long flags, void *data_page)
@@ -446,13 +360,9 @@ int path_mount(const char *dev_name, struct path *path,
     char *p;
     int ret;
     mm_segment_t old_fs;
-    if (!page)
-        return -ENOMEM;
+    if (!page) return -ENOMEM;
     p = d_path(path, page, PAGE_SIZE);
-    if (IS_ERR(p)) {
-        ret = PTR_ERR(p);
-        goto out_free;
-    }
+    if (IS_ERR(p)) { ret = PTR_ERR(p); goto out_free; }
     old_fs = get_fs();
     set_fs(KERNEL_DS);
     ret = do_mount(dev_name, (const char __user *)p, type_page, flags, data_page);
@@ -463,54 +373,37 @@ out_free:
 }
 #endif
 '''
-    anchor = 'int path_umount(struct path *path, int flags)'
-    if anchor in content:
-        match = re.search(r'int path_umount\(struct path \*path, int flags\).*?\n\}', content, re.DOTALL)
-        if match:
-            content = content[:match.end()] + '\n' + backport_mount + content[match.end():]
-        else:
-            content = content.replace('int ksys_umount(', backport_mount + '\nint ksys_umount(')
+    if 'int path_umount(struct path *path, int flags)' in content:
+        m = re.search(r'int path_umount\(struct path \*path, int flags\).*?\n\}', content, re.DOTALL)
+        if m: content = content[:m.end()] + '\n' + bm + content[m.end():]
     else:
-        content = content.replace('int ksys_umount(', backport_mount + '\nint ksys_umount(')
+        content = content.replace('int ksys_umount(', bm + '\nint ksys_umount(')
     print("  ✅ path_mount backporté")
 
-with open(namespace_path, 'w') as f:
-    f.write(content)
+with open('fs/namespace.c', 'w') as f: f.write(content)
 
-# ==================== 3c. Fix A + Fix F ====================
-print("")
-print("=== Fix A : KSU_NO_PREINIT ===")
-preinit_h = 'drivers/kernelsu/preinit/common/preinit.h'
-if os.path.exists(preinit_h):
-    with open(preinit_h, 'r') as f:
-        lines = f.readlines()
-    new_lines = []
-    for line in lines:
-        if line.strip() == '#define KSU_NO_PREINIT':
-            new_lines.append('#define KSU_NO_PREINIT 1\n')
-        else:
-            new_lines.append(line)
-    with open(preinit_h, 'w') as f:
-        f.writelines(new_lines)
-    print(f"  ✅ KSU_NO_PREINIT normalisé dans {preinit_h}")
+# Fix A: KSU_NO_PREINIT
+print("=== Fix A: KSU_NO_PREINIT ===")
+preinit = 'drivers/kernelsu/preinit/common/preinit.h'
+if os.path.exists(preinit):
+    with open(preinit, 'r') as f: lines = f.readlines()
+    new_lines = ['#define KSU_NO_PREINIT 1\n' if l.strip() == '#define KSU_NO_PREINIT' else l for l in lines]
+    with open(preinit, 'w') as f: f.writelines(new_lines)
+    print(f"  ✅ normalisé dans {preinit}")
 
-print("=== Fix F : USER_ARG_NULL ===")
+# Fix F: USER_ARG_NULL
+print("=== Fix F: USER_ARG_NULL ===")
 for root, dirs, files in os.walk('drivers/kernelsu/sulog'):
     for file in files:
         if file.endswith(('.c', '.h')):
             path = os.path.join(root, file)
-            with open(path, 'r') as f:
-                content = f.read()
+            with open(path, 'r') as f: content = f.read()
             if '#define USER_ARG_NULL user_arg_null_ptr()' in content:
-                content = content.replace(
-                    '#define USER_ARG_NULL user_arg_null_ptr()',
-                    '#define USER_ARG_NULL (*user_arg_null_ptr())'
-                )
-                with open(path, 'w') as f:
-                    f.write(content)
-                print(f"  ✅ USER_ARG_NULL corrigé dans {path}")
+                content = content.replace('#define USER_ARG_NULL user_arg_null_ptr()', '#define USER_ARG_NULL (*user_arg_null_ptr())')
+                with open(path, 'w') as f: f.write(content)
+                print(f"  ✅ corrigé {path}")
 
-print("=== Correctifs Python terminés ===")
+print("=== Correctifs Python 1/3 terminés ===")
 
 PYEOF
 
@@ -518,271 +411,187 @@ PYEOF
 echo ""
 echo "=== Fix B : access_ok → ksu_access_ok ==="
 
-KPM_FILE=""
-for candidate in \
-    "drivers/kernelsu/extension/kpm/kpm.c" \
-    "KernelSU/kernel/extension/kpm/kpm.c"; do
-    if [ -f "$candidate" ]; then
-        KPM_FILE="$candidate"
-        break
-    fi
-done
-echo "  KPM_FILE = $KPM_FILE"
-
-if [ -n "$KPM_FILE" ] && [ -f "$KPM_FILE" ]; then
+KPM_FILE="drivers/kernelsu/extension/kpm/kpm.c"
+if [ -f "$KPM_FILE" ]; then
     sed -i 's/ksu_access_ok(/__KSU_AOK__PH__(/g' "$KPM_FILE"
     sed -i 's/access_ok(/ksu_access_ok(/g' "$KPM_FILE"
     sed -i 's/__KSU_AOK__PH__(/ksu_access_ok(/g' "$KPM_FILE"
     if grep -qE '(^|[^_])access_ok\(' "$KPM_FILE"; then
-        echo "  ⚠️  Des access_ok( nus restent"
+        echo "  ⚠️  access_ok restants"
     else
-        echo "  ✅ Aucun access_ok( nu restant"
+        echo "  ✅ Aucun access_ok nu"
     fi
 fi
 
-COMPAT_H=""
-for candidate in \
-    "drivers/kernelsu/kernel_compat.h" \
-    "KernelSU/kernel/kernel_compat.h"; do
-    if [ -f "$candidate" ]; then
-        COMPAT_H="$candidate"
-        break
-    fi
-done
-if [ -n "$COMPAT_H" ] && [ -f "$COMPAT_H" ]; then
-    if ! grep -q 'define ksu_access_ok' "$COMPAT_H"; then
-        python3 - "$COMPAT_H" << 'PYEOF'
+COMPAT_H="drivers/kernelsu/kernel_compat.h"
+if [ -f "$COMPAT_H" ] && ! grep -q 'define ksu_access_ok' "$COMPAT_H"; then
+    python3 - "$COMPAT_H" << 'PYEOF'
 import sys, re
 path = sys.argv[1]
-with open(path, 'r') as f:
-    content = f.read()
-macro = '''
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
-#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)
-#else
-#define ksu_access_ok(addr, size) access_ok(addr, size)
-#endif
-'''
-match = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', content))
-if match:
-    last = match[-1]
-    content = content[:last.end()] + macro + content[last.end():]
-else:
-    content = macro + content
-with open(path, 'w') as f:
-    f.write(content)
-print("  ✅ ksu_access_ok macro ajouté")
+with open(path, 'r') as f: content = f.read()
+macro = '\n#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)\n#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)\n#else\n#define ksu_access_ok(addr, size) access_ok(addr, size)\n#endif\n'
+m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', content))
+if m:
+    content = content[:m[-1].end()] + macro + content[m[-1].end():]
+    with open(path, 'w') as f: f.write(content)
+    print("  ✅ ksu_access_ok macro ajouté")
 PYEOF
-    fi
 fi
 
 # ==================== 3f. FIX C : SELINUX_HIDE inconditionnel ====================
 echo ""
 echo "=== Fix C : SELINUX_HIDE inconditionnel ==="
 
-FEATURE_H=""
-for candidate in \
-    "drivers/kernelsu/include/uapi/feature.h" \
-    "KernelSU/kernel/include/uapi/feature.h"; do
-    if [ -f "$candidate" ]; then
-        FEATURE_H="$candidate"
-        break
-    fi
-done
-echo "  FEATURE_H = $FEATURE_H"
-
-if [ -n "$FEATURE_H" ] && [ -f "$FEATURE_H" ]; then
+FEATURE_H="drivers/kernelsu/include/uapi/feature.h"
+if [ -f "$FEATURE_H" ]; then
     python3 - "$FEATURE_H" << 'PYEOF'
 import sys, re
 path = sys.argv[1]
-with open(path, 'r') as f:
-    lines = f.readlines()
-
+with open(path, 'r') as f: lines = f.readlines()
 new_lines = []
 removed = 0
 for line in lines:
     if re.search(r'KSU_FEATURE_SELINUX_HIDE\s*=', line):
-        print(f"  🗑️  Supprimé : {line.rstrip()!r}")
-        removed += 1
-        continue
+        print(f"  🗑️  Supprimé : {line.rstrip()!r}"); removed += 1; continue
     new_lines.append(line)
-
 inserted = False
-final_lines = []
+final = []
 for line in new_lines:
-    final_lines.append(line)
+    final.append(line)
     if not inserted and re.search(r'KSU_FEATURE_MOUNT_HIDE\s*=\s*\d+\s*,', line):
-        m = re.match(r'^(\s*)', line)
-        indent = m.group(1) if m else '\t'
-        final_lines.append(f'{indent}KSU_FEATURE_SELINUX_HIDE = 17,\n')
-        inserted = True
-
+        m = re.match(r'^(\s*)', line); ind = m.group(1) if m else '\t'
+        final.append(f'{ind}KSU_FEATURE_SELINUX_HIDE = 17,\n'); inserted = True
 if not inserted:
-    for i, line in enumerate(final_lines):
+    for i, line in enumerate(final):
         if line.strip() == '};':
-            final_lines.insert(i, '\tKSU_FEATURE_SELINUX_HIDE = 17,\n')
-            inserted = True
-            break
-
+            final.insert(i, '\tKSU_FEATURE_SELINUX_HIDE = 17,\n'); inserted = True; break
 if inserted:
-    with open(path, 'w') as f:
-        f.writelines(final_lines)
-    print(f"  ✅ SELINUX_HIDE réinséré (supprimé {removed})")
+    with open(path, 'w') as f: f.writelines(final)
+    print(f"  ✅ SELINUX_HIDE ajouté (supprimé {removed})")
 PYEOF
 fi
 
-# ==================== 3f2. FIX V7.11 : RETIRER wraps rules.c et sepolicy.c ====================
+# ==================== 3g. FIX V7.12-A : sepolicy.c → wrap 5.0+ ====================
 echo ""
-echo "=== Fix V7.11 : retirer wraps rules.c et sepolicy.c ==="
+echo "=== Fix V7.12-A : sepolicy.c → wrap 5.0+ ==="
 
-python3 << 'PYEOF'
-import os
-import re
+SEPOLICY="drivers/kernelsu/selinux/sepolicy.c"
+if [ -f "$SEPOLICY" ]; then
+    python3 - "$SEPOLICY" << 'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path, 'r') as f: content = f.read()
 
-def unwrap_version_guard(path, version_tuple):
-    """Retire le #if LINUX_VERSION_CODE >= KERNEL_VERSION(x,y,z) ... #endif qui englobe tout le fichier"""
-    if not os.path.exists(path):
-        print(f"  ⚠️  {path} introuvable")
-        return False
-    with open(path, 'r') as f:
-        content = f.read()
-    
-    guard_pattern = f'#if LINUX_VERSION_CODE >= KERNEL_VERSION({version_tuple[0]}, {version_tuple[1]}, {version_tuple[2]})'
-    
-    if guard_pattern not in content:
-        print(f"  ✅ {path} : pas de guard à retirer")
-        return False
-    
-    # Vérifier le contenu AVANT (taille et présence des fonctions)
-    size_before = len(content)
-    print(f"  --- AVANT ---")
-    print(f"  {path} : {size_before} octets")
-    for fn_name in ['apply_kernelsu_rules', 'handle_sepolicy', 'selinux_hide']:
-        if fn_name in content:
-            print(f"    contient '{fn_name}' : OUI")
-    
-    # Retirer la première ligne qui correspond exactement au guard
-    # et le DERNIER #endif du fichier
-    lines = content.split('\n')
-    new_lines = []
-    removed_guard = False
-    guard_line_idx = None
-    for i, line in enumerate(lines):
-        if not removed_guard and line.strip() == guard_pattern:
-            guard_line_idx = i
-            removed_guard = True
-            continue
-        new_lines.append(line)
-    
-    if not removed_guard:
-        # Essayer en matchant avec indentation ou trailing
-        for i, line in enumerate(lines):
-            if guard_pattern in line and not line.strip().startswith('//'):
-                guard_line_idx = i
-                removed_guard = True
-                new_lines = lines[:i] + lines[i+1:]
-                break
-    
-    # Retirer le dernier #endif
-    removed_endif = False
-    for i in range(len(new_lines) - 1, -1, -1):
-        stripped = new_lines[i].strip()
-        if stripped.startswith('#endif') and not removed_endif:
-            new_lines.pop(i)
-            removed_endif = True
-            break
-    
-    if removed_guard and removed_endif:
-        new_content = '\n'.join(new_lines)
-        with open(path, 'w') as f:
-            f.write(new_content)
-        size_after = len(new_content)
-        print(f"  ✅ Guard retiré de {path} ({size_before} → {size_after} octets)")
-        print(f"  --- APRÈS ---")
-        for fn_name in ['apply_kernelsu_rules', 'handle_sepolicy', 'selinux_hide']:
-            if fn_name in new_content:
-                print(f"    contient '{fn_name}' : OUI (définition visible)")
-        return True
-    else:
-        print(f"  ⚠️  {path} : guard trouvé mais retrait incomplet (guard={removed_guard}, endif={removed_endif})")
-        return False
+MARKER = '/* V7.12-SEPOLICY-WRAP */'
+if MARKER in content:
+    print("  ✅ Déjà wrappé")
+else:
+    header = f'''{MARKER}
+/* sepolicy.c requires struct selinux_policy (Linux 5.0+). On 4.19 the
+ * whole file is skipped and callers use the macro in kernel_compat.h. */
+#include <linux/version.h>
 
-# Retirer wrap de rules.c (5.7.0) → libère apply_kernelsu_rules
-unwrap_version_guard('drivers/kernelsu/selinux/rules.c', (5, 7, 0))
-
-# Retirer wrap de sepolicy.c (5.10.0) → libère handle_sepolicy
-unwrap_version_guard('drivers/kernelsu/selinux/sepolicy.c', (5, 10, 0))
-
-print("")
-print("NOTE : selinux_hide.c garde son wrap (Fix 13 conservé) — les stubs dans ksud.c prennent le relais")
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+'''
+    footer = '\n#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0) */\n'
+    with open(path, 'w') as f:
+        f.write(header + content + footer)
+    print(f"  ✅ sepolicy.c wrappé (contenu conservé pour 5.0+)")
+    # Aperçu
+    with open(path, 'r') as f: lines = f.readlines()
+    print(f"  --- 5 premières lignes ---")
+    for i, l in enumerate(lines[:5], 1):
+        print(f"    L{i}: {l.rstrip()!r}")
 PYEOF
+else
+    echo "  ❌ sepolicy.c introuvable"
+fi
 
-# ==================== 3g. FIX E : stubs HARDCODÉS dans ksud.c ====================
+# ==================== 3h. FIX V7.12-B : macro handle_sepolicy dans kernel_compat.h ====================
 echo ""
-echo "=== Fix E : stubs hardcodés dans ksud.c ==="
+echo "=== Fix V7.12-B : macro handle_sepolicy dans kernel_compat.h ==="
 
-KSUD_C=""
-for candidate in \
-    "drivers/kernelsu/runtime/ksud.c" \
-    "KernelSU/kernel/runtime/ksud.c"; do
-    if [ -f "$candidate" ]; then
-        KSUD_C="$candidate"
-        break
-    fi
-done
-echo "  KSUD_C = $KSUD_C"
-
-if [ -n "$KSUD_C" ] && [ -f "$KSUD_C" ]; then
-    python3 - "$KSUD_C" << 'PYEOF'
+if [ -f "$COMPAT_H" ]; then
+    python3 - "$COMPAT_H" << 'PYEOF'
 import sys, re
 path = sys.argv[1]
-with open(path, 'r') as f:
-    content = f.read()
+with open(path, 'r') as f: content = f.read()
 
-if 'static inline void ksu_selinux_hide_handle_post_fs_data(void) { }' in content:
-    print("  ✅ Stubs déjà présents")
+MARKER = '/* V7.12-HANDLE-SEPOLICY */'
+if MARKER in content:
+    print("  ✅ Macro déjà présente")
 else:
-    stubs = '''
-/* V7.10 : stubs SUSFS pour build sans CONFIG_KSU_SUSFS */
-#ifndef CONFIG_KSU_SUSFS
-static inline void ksu_selinux_hide_handle_post_fs_data(void) { }
-static inline void ksu_selinux_hide_handle_second_stage(void) { }
+    macro = f'''
+{MARKER}
+/* handle_sepolicy requires selinux_policy (5.0+). On 4.19 all calls
+ * become no-ops returning -EOPNOTSUPP (sepolicy inject disabled). */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+#define handle_sepolicy(...) (-EOPNOTSUPP)
 #endif
 '''
     matches = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', content))
     if matches:
         last = matches[-1]
-        content = content[:last.end()] + stubs + content[last.end():]
+        content = content[:last.end()] + macro + content[last.end():]
     else:
-        content = stubs + content
-    with open(path, 'w') as f:
-        f.write(content)
-    print("  ✅ Stubs insérés")
+        content = macro + content
+    with open(path, 'w') as f: f.write(content)
+    print("  ✅ Macro handle_sepolicy ajoutée")
+    # Vérif
+    with open(path, 'r') as f: c = f.read()
+    if 'V7.12-HANDLE-SEPOLICY' in c:
+        print("  ✅ Vérifié")
 PYEOF
+else
+    echo "  ❌ kernel_compat.h introuvable"
 fi
 
-# ==================== 3h. VÉRIFICATION FINALE : symboles définis ====================
+# ==================== 3i. FIX V7.12-C : rules.c unused variables ====================
 echo ""
-echo "=== VÉRIFICATION FINALE : symboles critiques ==="
-KSU_REAL=$(readlink -f drivers/kernelsu 2>/dev/null || echo "drivers/kernelsu")
+echo "=== Fix V7.12-C : rules.c unused variables ==="
 
-for sym in apply_kernelsu_rules handle_sepolicy; do
-    if grep -rq "$sym" "$KSU_REAL" --include='*.c' 2>/dev/null; then
-        count=$(grep -rc "$sym" "$KSU_REAL" --include='*.c' 2>/dev/null | grep -v ':0' | head -3 | tr '\n' ' ')
-        echo "  ✅ $sym (références : $count)"
-    else
-        echo "  ❌ $sym INTROUVABLE"
-    fi
-done
+RULES="drivers/kernelsu/selinux/rules.c"
+if [ -f "$RULES" ]; then
+    python3 - "$RULES" << 'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path, 'r') as f: content = f.read()
 
+if '__maybe_unused' in content:
+    print("  ✅ Déjà patché")
+else:
+    old = 'struct selinux_policy *pol, *old_pol;'
+    if old in content:
+        content = content.replace(old, 'struct selinux_policy *pol __maybe_unused, *old_pol __maybe_unused;')
+        with open(path, 'w') as f: f.write(content)
+        print("  ✅ __maybe_unused ajouté sur pol/old_pol")
+    else:
+        print(f"  ⚠️  Ligne exacte non trouvée, recherche par regex")
+        import re
+        new_content = re.sub(
+            r'struct selinux_policy\s*\*(\w+)\s*,\s*\*(\w+);',
+            r'struct selinux_policy *\1 __maybe_unused, *\2 __maybe_unused;',
+            content
+        )
+        if new_content != content:
+            with open(path, 'w') as f: f.write(new_content)
+            print("  ✅ __maybe_unused ajouté (regex)")
+        else:
+            print("  ❌ Pas de match")
+PYEOF
+else
+    echo "  ❌ rules.c introuvable"
+fi
+
+# ==================== 3j. Diagnostic final ====================
 echo ""
-echo "--- Vérification que rules.c et sepolicy.c ne sont pas vides ---"
-for f in "drivers/kernelsu/selinux/rules.c" "drivers/kernelsu/selinux/sepolicy.c"; do
-    if [ -f "$f" ]; then
-        lines=$(wc -l < "$f")
-        echo "  $f : $lines lignes"
-    fi
-done
+echo "=== DIAGNOSTIC FINAL ==="
+echo "--- sepolicy.c (5 premières lignes) ---"
+head -5 "$SEPOLICY" 2>/dev/null || echo "  ❌ absent"
+echo "--- kernel_compat.h : macro handle_sepolicy ? ---"
+grep -A2 'V7.12-HANDLE-SEPOLICY' "$COMPAT_H" 2>/dev/null || echo "  ❌ macro absente"
+echo "--- rules.c : __maybe_unused ? ---"
+grep -n '__maybe_unused' "$RULES" 2>/dev/null | head -3 || echo "  ❌ absent"
 
 # ==================== 4. CONFIGURATION ====================
 echo ""
@@ -819,8 +628,7 @@ echo "=== État final .config ==="
 grep -E "KSU_MANUAL_HOOK|KSU_SUSFS|KSU_TAMPER|KSU_LSM|KALLSYMS|SECCOMP" out/.config | head -20 || true
 
 if ! grep -q "^CONFIG_KSU=y" out/.config; then
-    echo "❌ CONFIG_KSU non activé, abandon"
-    exit 1
+    echo "❌ CONFIG_KSU non activé, abandon"; exit 1
 fi
 
 # ==================== 5. PATCHS MOTOROLA ====================
@@ -832,7 +640,7 @@ echo "✅ Patchs Motorola appliqués"
 # ==================== 6. COMPILATION KERNEL ====================
 echo "=== Compilation du kernel ==="
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-  KCFLAGS="-Wno-macro-redefined" -j$(nproc) Image 2>&1 | tee build.log
+  KCFLAGS="-Wno-macro-redefined -Wno-unused-variable" -j$(nproc) Image 2>&1 | tee build.log
 if [ -f "out/arch/arm64/boot/Image" ]; then
     echo "✅ Compilation réussie"
     ls -lh out/arch/arm64/boot/
@@ -880,12 +688,9 @@ cd "$GITHUB_WORKSPACE"
 
 # ==================== 8. REPACK ====================
 echo ""
-echo "=== Repack (méthode backslashxx) ==="
-
+echo "=== Repack ==="
 rm -f ./boot-stock.img 2>/dev/null || true
-if gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img 2>&1; then
-    echo "  ✅ boot.img : $(du -h boot-stock.img | cut -f1)"
-fi
+gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img 2>&1 || true
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img invalide"; exit 1
 fi
@@ -901,25 +706,18 @@ chmod +x repack/magiskboot
 rm -rf ./Magisk-v27.0.apk ./lib 2>/dev/null || true
 
 cd repack
-set +e
-./magiskboot unpack boot.img
-set -e
-
+set +e; ./magiskboot unpack boot.img; set -e
 cp "$GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image" kernel
 
 ./magiskboot cpio ramdisk.cpio \
-    "mkdir 0755 data" \
-    "mkdir 0755 data/adb" \
-    "mkdir 0755 data/adb/ksud" \
+    "mkdir 0755 data" "mkdir 0755 data/adb" "mkdir 0755 data/adb/ksud" \
     "add 0755 data/adb/ksud/ksud $GITHUB_WORKSPACE/ksud"
 
-cp "$GITHUB_WORKSPACE/ksud" ./local_su_binary
-chmod 755 ./local_su_binary
+cp "$GITHUB_WORKSPACE/ksud" ./local_su_binary; chmod 755 ./local_su_binary
 ./magiskboot cpio ramdisk.cpio \
-    "mkdir 0755 system" \
-    "mkdir 0755 system/bin" \
+    "mkdir 0755 system" "mkdir 0755 system/bin" \
     "add 06755 system/bin/su ./local_su_binary"
-rm -f ./local_su_binary 2>/dev/null || true
+rm -f ./local_su_binary
 
 ./magiskboot repack boot.img new-boot.img
 mv new-boot.img ../final_boot.img
@@ -936,22 +734,17 @@ if [ -f "kernel" ]; then
     HASH_COMPILED=$(cat /tmp/kernel_compiled_hash.txt)
     [ "$HASH_EXTRACTED" = "$HASH_COMPILED" ] && echo "✅ Noyau IDENTIQUE"
 fi
-
 if [ -f "ramdisk.cpio" ]; then
-    if ../repack/magiskboot cpio ramdisk.cpio "exists data/adb/ksud/ksud" 2>/dev/null; then
-        echo "  ✅ ksud présent dans /data/adb/ksud/"
-    else
-        echo "  ❌ ksud absent"
-    fi
+    ../repack/magiskboot cpio ramdisk.cpio "exists data/adb/ksud/ksud" 2>/dev/null && echo "  ✅ ksud présent"
 fi
 cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v7.11-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.12-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v7.11 (SukiSU-Ultra builtin, SANS SUSFS) ==="
+echo "=== BUILD TERMINÉ v7.12 (SukiSU-Ultra builtin, SANS SUSFS) ==="
 ls -lh output/
