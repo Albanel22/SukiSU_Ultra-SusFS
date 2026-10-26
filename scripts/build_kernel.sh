@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.15 : SukiSU-Ultra (ShirkNeko/builtin) — COMPILE-ONLY
-#         Pas de SUSFS. Pas de KernelSU-Next. Pas de headers externes.
-#         Objectif unique : générer Image.
+# V7.18 : SukiSU-Ultra builtin — COMPILE-ONLY (V7.17 + diagnostic V8)
+#         Stratégie : skip total rules.c/sepolicy.c + HACK_ARM64_BRANCH_LINK
+#         Section 3r : diagnostic des fonctions selinux_policy pour V8
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin (COMPILE-ONLY) — V7.15 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.18 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -29,18 +29,18 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION SukiSU-Ultra (builtin) ====================
+# ==================== 2. INTÉGRATION SukiSU-Ultra ====================
 echo "=== Intégration SukiSU-Ultra (builtin) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-[ ! -d "drivers/kernelsu" ] && echo "❌ Échec intégration" && exit 1
+[ ! -d "drivers/kernelsu" ] && echo "❌" && exit 1
 echo "✅ intégré"
 
-# ==================== 3. FIXES DE COMPATIBILITÉ 4.19 ====================
+# ==================== 3. FIXES COMPATIBILITÉ 4.19 ====================
 echo ""
-echo "=== Fixes de compatibilité 4.19 ==="
+echo "=== Fixes compatibilité 4.19 ==="
 
-# 3a. static_call.h stub
+# 3a. static_call.h
 [ ! -f "include/linux/static_call.h" ] && cat > include/linux/static_call.h <<'EOF'
 #ifndef _LINUX_STATIC_CALL_H
 #define _LINUX_STATIC_CALL_H
@@ -60,23 +60,16 @@ done
 for f in drivers/kernelsu/infra/file_wrapper.c drivers/kernelsu/file_wrapper.c; do
     [ ! -f "$f" ] && continue
     python3 - "$f" <<'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path) as f: c = f.read()
-c = c.replace('return orig->f_op->iopoll(kiocb, spin);',
-    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)\n        return orig->f_op->iopoll(kiocb, spin);\n#else\n        return -EOPNOTSUPP;\n#endif')
-c = c.replace('p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;',
-    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)\n    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\n#endif')
-c = c.replace('if (remap_flags & REMAP_FILE_DEDUP) {',
-    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)\n    if (remap_flags & REMAP_FILE_DEDUP) {\n#else\n    if (0) {\n#endif')
-c = c.replace('return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);',
-    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)\n        return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif')
-c = c.replace('return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);',
-    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)\n        return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif')
-c = c.replace('p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;',
-    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)\n    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n#endif')
+import sys
+with open(sys.argv[1]) as f: c = f.read()
+c = c.replace('return orig->f_op->iopoll(kiocb, spin);', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)\n        return orig->f_op->iopoll(kiocb, spin);\n#else\n        return -EOPNOTSUPP;\n#endif')
+c = c.replace('p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)\n    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\n#endif')
+c = c.replace('if (remap_flags & REMAP_FILE_DEDUP) {', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)\n    if (remap_flags & REMAP_FILE_DEDUP) {\n#else\n    if (0) {\n#endif')
+c = c.replace('return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)\n        return orig->f_op->remap_file_range(file_in, pos_in, orig, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif')
+c = c.replace('return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)\n        return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);\n#else\n        return -EOPNOTSUPP;\n#endif')
+c = c.replace('p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)\n    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n#endif')
 c = c.replace('struct file *orig = data->orig;', 'struct file *orig __maybe_unused = data->orig;')
-with open(path, 'w') as f: f.write(c)
+with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
 
@@ -86,12 +79,11 @@ for f in drivers/kernelsu/infra/seccomp_cache.c drivers/kernelsu/seccomp_cache.c
     grep -q 'SECCOMP_ARCH_NATIVE_NR' "$f" && continue
     python3 - "$f" <<'PYEOF'
 import sys, re
-path = sys.argv[1]
-with open(path) as f: c = f.read()
+with open(sys.argv[1]) as f: c = f.read()
 fb = '\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR NR_syscalls\n#endif\n#ifndef SECCOMP_ARCH_COMPAT_NR\n#define SECCOMP_ARCH_COMPAT_NR NR_syscalls\n#endif\n'
 m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', c)
 if m: c = c[:m.end()] + fb + c[m.end():]
-with open(path, 'w') as f: f.write(c)
+with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
 
@@ -105,23 +97,19 @@ for f in drivers/kernelsu/manager/pkg_observer.c drivers/kernelsu/pkg_observer.c
     [ ! -f "$f" ] && continue
     python3 - "$f" <<'PYEOF'
 import sys, re
-path = sys.argv[1]
-with open(path) as f: c = f.read()
-c = c.replace('.handle_inode_event = ksu_handle_inode_event,',
-    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)\n\t.handle_inode_event = ksu_handle_inode_event,\n#endif')
-c = re.sub(r'(\s*)susfs_parse_priority_app_strings\(\);',
-    r'\1#ifdef CONFIG_KSU_SUSFS\n\1susfs_parse_priority_app_strings();\n\1#endif', c)
-with open(path, 'w') as f: f.write(c)
+with open(sys.argv[1]) as f: c = f.read()
+c = c.replace('.handle_inode_event = ksu_handle_inode_event,', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)\n\t.handle_inode_event = ksu_handle_inode_event,\n#endif')
+c = re.sub(r'(\s*)susfs_parse_priority_app_strings\(\);', r'\1#ifdef CONFIG_KSU_SUSFS\n\1susfs_parse_priority_app_strings();\n\1#endif', c)
+with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
 
-# 3g. allowlist.c + supercall.c : TWA_RESUME
+# 3g. TWA_RESUME
 for f in drivers/kernelsu/policy/allowlist.c drivers/kernelsu/allowlist.c drivers/kernelsu/supercall/supercall.c; do
     [ ! -f "$f" ] && continue
     python3 - "$f" <<'PYEOF'
 import sys, re
-path = sys.argv[1]
-with open(path) as f: c = f.read()
+with open(sys.argv[1]) as f: c = f.read()
 if 'TWA_RESUME' in c and '#ifndef TWA_RESUME' not in c:
     fb = '\n#ifndef TWA_RESUME\n#define TWA_RESUME 1\n#endif\n'
     m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', c)
@@ -129,20 +117,19 @@ if 'TWA_RESUME' in c and '#ifndef TWA_RESUME' not in c:
 if '#include <linux/sched/task.h>' not in c:
     m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', c)
     if m: c = c[:m.end()] + '#include <linux/sched/task.h>\n' + c[m.end():]
-with open(path, 'w') as f: f.write(c)
+with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
 
-# 3h. dispatch.c : includes
+# 3h. dispatch.c
 [ -f "drivers/kernelsu/supercall/dispatch.c" ] && python3 - drivers/kernelsu/supercall/dispatch.c <<'PYEOF'
 import sys, re
-path = sys.argv[1]
-with open(path) as f: c = f.read()
+with open(sys.argv[1]) as f: c = f.read()
 for inc in ['#include <linux/sched.h>', '#include <linux/sched/task.h>', '#include <linux/init_task.h>']:
     if inc not in c:
         m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', c)
         if m: c = c[:m.end()] + inc + '\n' + c[m.end():]
-with open(path, 'w') as f: f.write(c)
+with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 
 # 3i. app_profile.c
@@ -154,12 +141,10 @@ done
 # 3j. cpu_spoof.c
 [ -f "drivers/kernelsu/extension/cpu_spoof.c" ] && python3 - drivers/kernelsu/extension/cpu_spoof.c <<'PYEOF'
 import sys, re
-path = sys.argv[1]
-with open(path) as f: c = f.read()
-c = c.replace('(*curr_cs_ptr)->vdso_clock_mode =',
-    '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)\n                        (*curr_cs_ptr)->vdso_clock_mode =')
+with open(sys.argv[1]) as f: c = f.read()
+c = c.replace('(*curr_cs_ptr)->vdso_clock_mode =', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)\n                        (*curr_cs_ptr)->vdso_clock_mode =')
 c = re.sub(r'(#if LINUX_VERSION_CODE >= KERNEL_VERSION\(5,7,0\)\n\s*\(\*curr_cs_ptr\)->vdso_clock_mode\s*=\s*[^;]+;)', r'\1\n#endif', c)
-with open(path, 'w') as f: f.write(c)
+with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 
 # 3k. sulog/event.c
@@ -173,7 +158,7 @@ find drivers/kernelsu/sulog -name '*.c' -o -name '*.h' 2>/dev/null | while read 
     sed -i 's|#define USER_ARG_NULL user_arg_null_ptr()|#define USER_ARG_NULL (*user_arg_null_ptr())|' "$f"
 done
 
-# 3n. access_ok → ksu_access_ok
+# 3n. access_ok
 KPM="drivers/kernelsu/extension/kpm/kpm.c"
 if [ -f "$KPM" ]; then
     sed -i 's/ksu_access_ok(/__AOK__PH__(/g' "$KPM"
@@ -184,26 +169,21 @@ COMPAT="drivers/kernelsu/kernel_compat.h"
 if [ -f "$COMPAT" ] && ! grep -q 'define ksu_access_ok' "$COMPAT"; then
     python3 - "$COMPAT" <<'PYEOF'
 import sys, re
-path = sys.argv[1]
-with open(path) as f: c = f.read()
+with open(sys.argv[1]) as f: c = f.read()
 macro = '\n#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)\n#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)\n#else\n#define ksu_access_ok(addr, size) access_ok(addr, size)\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + macro + c[m[-1].end():]
-with open(path, 'w') as f: f.write(c)
+with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
 
-# 3o. feature.h : SELINUX_HIDE inconditionnel
+# 3o. feature.h
 FEAT="drivers/kernelsu/include/uapi/feature.h"
 if [ -f "$FEAT" ]; then
     python3 - "$FEAT" <<'PYEOF'
 import sys, re
-path = sys.argv[1]
-with open(path) as f: lines = f.readlines()
-new = []
-for l in lines:
-    if re.search(r'KSU_FEATURE_SELINUX_HIDE\s*=', l): continue
-    new.append(l)
+with open(sys.argv[1]) as f: lines = f.readlines()
+new = [l for l in lines if not re.search(r'KSU_FEATURE_SELINUX_HIDE\s*=', l)]
 final = []
 inserted = False
 for l in new:
@@ -216,11 +196,11 @@ if not inserted:
         if l.strip() == '};':
             final.insert(i, '\tKSU_FEATURE_SELINUX_HIDE = 17,\n'); inserted = True; break
 if inserted:
-    with open(path, 'w') as f: f.writelines(final)
+    with open(sys.argv[1], 'w') as f: f.writelines(final)
 PYEOF
 fi
 
-# 3p. path_umount / path_mount dans fs/namespace.c
+# 3p. path_umount/path_mount
 python3 - <<'PYEOF'
 import re
 with open('fs/namespace.c') as f: c = f.read()
@@ -270,99 +250,86 @@ out_free: free_page((unsigned long)page); return ret;
 with open('fs/namespace.c', 'w') as f: f.write(c)
 PYEOF
 
-# 3q. stubs ksu_selinux_hide_* dans ksud.c
+# 3q. stubs ksu_selinux_hide_*
 KSUD="drivers/kernelsu/runtime/ksud.c"
 if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' "$KSUD"; then
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
-path = sys.argv[1]
-with open(path) as f: c = f.read()
-stubs = '\n/* V7.15 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+with open(sys.argv[1]) as f: c = f.read()
+stubs = '\n/* V7.18 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
-with open(path, 'w') as f: f.write(c)
+with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
 
-# ==================== 4. WRAP 5.0+ DANS sepolicy.c ET rules.c ====================
+# ==================== 3r. DIAGNOSTIC V8 : fonctions selinux_policy à wrapper ====================
 echo ""
-echo "=== Wrap 5.0+ : sepolicy.c (fichier entier) + rules.c (2 fonctions) ==="
+echo "=== Diagnostic V8 : fonctions selinux_policy dans le module ==="
 
-# 4a. sepolicy.c : wrapper tout le fichier
-SEPOLICY="drivers/kernelsu/selinux/sepolicy.c"
-if [ -f "$SEPOLICY" ] && ! grep -q 'V7.15-SEPOLICY-WRAP' "$SEPOLICY"; then
-    python3 - "$SEPOLICY" <<'PYEOF'
-import sys
-path = sys.argv[1]
-with open(path) as f: c = f.read()
-header = '/* V7.15-SEPOLICY-WRAP */\n/* struct selinux_policy est 5.0+, on skip le fichier sur 4.19 */\n#include <linux/version.h>\n\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)\n'
-footer = '\n#endif /* >= 5.0.0 */\n'
-with open(path, 'w') as f: f.write(header + c + footer)
-print("  ✅ sepolicy.c wrappé")
-PYEOF
-fi
+echo "--- rules.c : occurrences de 'selinux_policy' ---"
+grep -n 'selinux_policy' drivers/kernelsu/selinux/rules.c 2>/dev/null | head -25 || echo "  (aucune)"
 
-# 4b. rules.c : wrapper apply_kernelsu_rules et handle_sepolicy individuellement
-RULES="drivers/kernelsu/selinux/rules.c"
-if [ -f "$RULES" ] && ! grep -q 'V7.15-RULES-WRAP' "$RULES"; then
-    python3 - "$RULES" <<'PYEOF'
+echo ""
+echo "--- sepolicy.c : fonctions utilisant 'selinux_policy' ---"
+grep -n 'struct selinux_policy' drivers/kernelsu/selinux/sepolicy.c 2>/dev/null | head -10 || echo "  (aucune)"
+
+echo ""
+echo "--- ksu.h : déclaration backup_sepolicy ---"
+grep -n 'backup_sepolicy' drivers/kernelsu/include/ksu.h 2>/dev/null || echo "  (aucune)"
+
+echo ""
+echo "--- sepolicy.h : signatures (doivent utiliser policydb) ---"
+grep -E '^bool ksu_|^struct selinux_policy|^void ksu_' drivers/kernelsu/selinux/sepolicy.h 2>/dev/null | head -25 || echo "  (aucune)"
+
+# ==================== 4. SKIP rules.c/sepolicy.c + STUBS ====================
+echo ""
+echo "=== V7.18 : skip rules.c + sepolicy.c sur 4.19, stubs à la place ==="
+
+KSU_MAIN="drivers/kernelsu/ksu_main.c"
+python3 - "$KSU_MAIN" <<'PYEOF'
 import sys, re
 path = sys.argv[1]
 with open(path) as f: content = f.read()
 
-def wrap_func(content, func_name, stub_code):
-    # Chercher la signature puis le { et compter les accolades
-    m = re.search(rf'^[ \t]*(?:[a-zA-Z_][a-zA-Z0-9_*\s]*\s+)?{re.escape(func_name)}\s*\([^)]*\)\s*\{{',
-                  content, re.MULTILINE)
-    if not m:
-        print(f"  ❌ {func_name} non trouvé")
-        return content, False
-    start = m.start()
-    brace_idx = m.end() - 1
-    depth = 1
-    i = brace_idx + 1
-    while i < len(content) and depth > 0:
-        if content[i] == '{': depth += 1
-        elif content[i] == '}': depth -= 1
-        i += 1
-    end = i
-    original = content[start:end]
-    wrapped = f'#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)\n{original}\n#else\n{stub_code}\n#endif'
-    print(f"  ✅ {func_name} wrappé ({len(original)} → {len(wrapped)} octets)")
-    return content[:start] + wrapped + content[end:], True
+if 'V7.18-SKIP' in content:
+    print("✅ déjà patché")
+    sys.exit(0)
 
-content, ok1 = wrap_func(content, 'apply_kernelsu_rules',
-    'void apply_kernelsu_rules(void)\n{\n\t/* V7.15 stub 4.19 : pas d\'injection SELinux */\n}')
+lines = content.split('\n')
+include_idx = [i for i, l in enumerate(lines) if re.match(r'^\s*#include\s+"selinux/(rules|sepolicy)\.c"', l)]
 
-content, ok2 = wrap_func(content, 'handle_sepolicy',
-    'int handle_sepolicy(void __user *user_data, u64 data_len)\n{\n\t/* V7.15 stub 4.19 */\n\treturn -EOPNOTSUPP;\n}')
-
-if not (ok1 and ok2):
-    print("  ❌ Wrap incomplet — abandon")
+if len(include_idx) < 2:
+    print(f"❌ {len(include_idx)} include(s) trouvé(s), 2 attendus")
     sys.exit(1)
 
-content = '/* V7.15-RULES-WRAP */\n' + content
-with open(path, 'w') as f: f.write(content)
+first = include_idx[0]
+last = include_idx[-1]
+
+new_block = [
+    '#include <linux/version.h>',
+    '',
+    '/* V7.18-SKIP : rules.c + sepolicy.c requièrent Linux 5.0+ */',
+    '#if LINUX_VERSION_CODE >= 327680 /* 5.0.0 */',
+]
+for idx in include_idx:
+    new_block.append(lines[idx])
+new_block += [
+    '#else /* 4.19 : stubs */',
+    'void apply_kernelsu_rules(void) { }',
+    'int handle_sepolicy(void __user *user_data, u64 data_len) { return -EOPNOTSUPP; }',
+    '#endif',
+]
+
+new_lines = lines[:first] + new_block + lines[last+1:]
+with open(path, 'w') as f: f.write('\n'.join(new_lines))
+print(f"✅ ksu_main.c patché (includes L{first+1}, L{last+1})")
 PYEOF
-    if [ $? -ne 0 ]; then
-        echo "❌ Impossible de wrapper rules.c — arrêt"
-        exit 1
-    fi
-else
-    echo "  ✅ rules.c déjà wrappé"
-fi
 
+# ==================== 5. CONFIGURATION OFFICIELLE ====================
 echo ""
-echo "--- Vérification finale des symboles ---"
-echo "apply_kernelsu_rules : $(grep -c 'apply_kernelsu_rules' $RULES 2>/dev/null || echo 0) occurrences"
-echo "handle_sepolicy     : $(grep -c 'handle_sepolicy'     $RULES 2>/dev/null || echo 0) occurrences"
-echo "ksu_type (doit être 0 en dehors du wrap) : $(grep -c 'ksu_type' $RULES 2>/dev/null || echo 0)"
-echo "ksu_allow (doit être 0 en dehors du wrap) : $(grep -c 'ksu_allow' $RULES 2>/dev/null || echo 0)"
-
-# ==================== 5. CONFIGURATION ====================
-echo ""
-echo "=== Configuration SukiSU-Ultra (SANS SUSFS) ==="
+echo "=== Configuration officielle SukiSU-Ultra (V7.18) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -370,14 +337,18 @@ mkdir -p out
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
 
 cat >> out/.config <<'EOF'
+# SukiSU-Ultra builtin (config officielle 4.19)
 CONFIG_KSU=y
-CONFIG_KSU_MANUAL_HOOK=y
+CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y
 # CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set
-# CONFIG_KSU_SUSFS is not set
+# CONFIG_KSU_KPROBES_KSUD is not set
+# CONFIG_KSU_MANUAL_HOOK is not set
 # CONFIG_KSU_TRACEPOINT_HOOK is not set
 CONFIG_KSU_LSM_SECURITY_HOOKS=y
 CONFIG_KSU_FEATURE_SULOG=y
 CONFIG_KSU_FEATURE_ADBROOT=y
+# CONFIG_KSU_SUSFS is not set
+# CONFIG_KPM is not set
 CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
 CONFIG_KPROBES=y
@@ -390,7 +361,16 @@ CONFIG_COMPAT_32BIT_TIME=y
 EOF
 
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
-grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ CONFIG_KSU"; exit 1; }
+
+echo "=== État config KSU ==="
+grep -E "^CONFIG_KSU" out/.config
+
+if grep -q '^CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y' out/.config; then
+    echo "✅ HACK_ARM64_BRANCH_LINK activé"
+else
+    echo "⚠️  HACK_ARM64_BRANCH_LINK non activé — vérifier dépendances"
+fi
+grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU désactivé"; exit 1; }
 
 # ==================== 6. PATCHS MOTOROLA ====================
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
@@ -407,7 +387,6 @@ if [ -f "out/arch/arm64/boot/Image" ]; then
     sha256sum out/arch/arm64/boot/Image | cut -d' ' -f1 > /tmp/kernel_compiled_hash.txt
 else
     echo "❌ BUILD FAILED"
-    echo "--- Erreurs ---"
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30
     exit 1
 fi
@@ -443,9 +422,9 @@ EOF
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 cargo +nightly build --release --target aarch64-linux-android
 KSUD=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
-[ -z "$KSUD" ] && echo "❌ ksud" && exit 1
+[ -z "$KSUD" ] && echo "❌" && exit 1
 cp "$KSUD" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
-echo "✅ ksud compilé"
+echo "✅ ksud"
 cd "$GITHUB_WORKSPACE"
 
 # ==================== 9. REPACK ====================
@@ -485,10 +464,10 @@ fi
 cd ..
 
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v7.15-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.18-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v7.15 ==="
+echo "=== BUILD TERMINÉ v7.18 ==="
 ls -lh output/
