@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.12 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
-#         V7.12 : wrap sepolicy.c 5.0+ + macro handle_sepolicy + rules.c unused
+# V7.13 : SukiSU-Ultra (ShirkNeko/builtin) — SANS SUSFS
+#         V7.13 : RETIRER macro handle_sepolicy (casse les déclarations)
+#                 + RESTAURER stubs ksu_selinux_hide_* (régression V7.12)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.12 ==="
+echo "=== Build SukiSU-Ultra (ShirkNeko/builtin, sans SUSFS) — V7.13 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -53,6 +54,7 @@ for p in \
     "drivers/kernelsu/runtime/ksud.c" \
     "drivers/kernelsu/selinux/rules.c" \
     "drivers/kernelsu/selinux/sepolicy.c" \
+    "drivers/kernelsu/selinux/selinux.h" \
     "drivers/kernelsu/supercall/dispatch.c"; do
     if [ -f "$p" ]; then echo "  ✅ $p"; else echo "  ❌ $p"; fi
 done
@@ -471,9 +473,47 @@ if inserted:
 PYEOF
 fi
 
-# ==================== 3g. FIX V7.12-A : sepolicy.c → wrap 5.0+ ====================
+# ==================== 3g. FIX V7.13-A : RETIRER macro handle_sepolicy (V7.12 régression) ====================
 echo ""
-echo "=== Fix V7.12-A : sepolicy.c → wrap 5.0+ ==="
+echo "=== Fix V7.13-A : RETIRER macro handle_sepolicy de kernel_compat.h ==="
+
+if [ -f "$COMPAT_H" ]; then
+    python3 - "$COMPAT_H" << 'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path, 'r') as f: content = f.read()
+
+if 'V7.12-HANDLE-SEPOLICY' not in content:
+    print("  ✅ Macro handle_sepolicy absente (rien à faire)")
+else:
+    # Retirer le bloc entier ajouté par V7.12
+    # Le bloc est : "\n/* V7.12-HANDLE-SEPOLICY */\n/* ... */\n#if ...\n#define handle_sepolicy(...) (-EOPNOTSUPP)\n#endif\n"
+    pattern = r'\n?/\* V7\.12-HANDLE-SEPOLICY \*/.*?#endif[^\n]*\n'
+    new_content = re.sub(pattern, '\n', content, flags=re.DOTALL)
+    if new_content != content:
+        with open(path, 'w') as f: f.write(new_content)
+        print("  🗑️  Macro handle_sepolicy RETIRÉE de kernel_compat.h")
+    else:
+        # Fallback : supprimer juste la ligne #define
+        lines = content.split('\n')
+        new_lines = [l for l in lines if not (l.strip() == '#define handle_sepolicy(...) (-EOPNOTSUPP)' or 'V7.12-HANDLE-SEPOLICY' in l)]
+        with open(path, 'w') as f: f.write('\n'.join(new_lines))
+        print("  🗑️  Ligne macro handle_sepolicy retirée (fallback)")
+
+# Vérification
+with open(path, 'r') as f: c = f.read()
+if 'define handle_sepolicy' in c:
+    print("  ⚠️  Macro handle_sepolicy encore présente")
+else:
+    print("  ✅ Aucune macro handle_sepolicy dans kernel_compat.h")
+PYEOF
+else
+    echo "  ❌ kernel_compat.h introuvable"
+fi
+
+# ==================== 3h. FIX V7.13-B : sepolicy.c wrap 5.0+ (conservé de V7.12) ====================
+echo ""
+echo "=== Fix V7.13-B : sepolicy.c wrap 5.0+ ==="
 
 SEPOLICY="drivers/kernelsu/selinux/sepolicy.c"
 if [ -f "$SEPOLICY" ]; then
@@ -488,72 +528,27 @@ if MARKER in content:
 else:
     header = f'''{MARKER}
 /* sepolicy.c requires struct selinux_policy (Linux 5.0+). On 4.19 the
- * whole file is skipped and callers use the macro in kernel_compat.h. */
+ * whole file is skipped. handle_sepolicy is defined in rules.c. */
 #include <linux/version.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
 '''
     footer = '\n#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0) */\n'
-    with open(path, 'w') as f:
-        f.write(header + content + footer)
-    print(f"  ✅ sepolicy.c wrappé (contenu conservé pour 5.0+)")
-    # Aperçu
-    with open(path, 'r') as f: lines = f.readlines()
-    print(f"  --- 5 premières lignes ---")
-    for i, l in enumerate(lines[:5], 1):
-        print(f"    L{i}: {l.rstrip()!r}")
+    with open(path, 'w') as f: f.write(header + content + footer)
+    print(f"  ✅ sepolicy.c wrappé (vide sur 4.19)")
 PYEOF
 else
     echo "  ❌ sepolicy.c introuvable"
 fi
 
-# ==================== 3h. FIX V7.12-B : macro handle_sepolicy dans kernel_compat.h ====================
+# ==================== 3i. FIX V7.13-C : rules.c __maybe_unused ====================
 echo ""
-echo "=== Fix V7.12-B : macro handle_sepolicy dans kernel_compat.h ==="
-
-if [ -f "$COMPAT_H" ]; then
-    python3 - "$COMPAT_H" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path, 'r') as f: content = f.read()
-
-MARKER = '/* V7.12-HANDLE-SEPOLICY */'
-if MARKER in content:
-    print("  ✅ Macro déjà présente")
-else:
-    macro = f'''
-{MARKER}
-/* handle_sepolicy requires selinux_policy (5.0+). On 4.19 all calls
- * become no-ops returning -EOPNOTSUPP (sepolicy inject disabled). */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
-#define handle_sepolicy(...) (-EOPNOTSUPP)
-#endif
-'''
-    matches = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', content))
-    if matches:
-        last = matches[-1]
-        content = content[:last.end()] + macro + content[last.end():]
-    else:
-        content = macro + content
-    with open(path, 'w') as f: f.write(content)
-    print("  ✅ Macro handle_sepolicy ajoutée")
-    # Vérif
-    with open(path, 'r') as f: c = f.read()
-    if 'V7.12-HANDLE-SEPOLICY' in c:
-        print("  ✅ Vérifié")
-PYEOF
-else
-    echo "  ❌ kernel_compat.h introuvable"
-fi
-
-# ==================== 3i. FIX V7.12-C : rules.c unused variables ====================
-echo ""
-echo "=== Fix V7.12-C : rules.c unused variables ==="
+echo "=== Fix V7.13-C : rules.c __maybe_unused ==="
 
 RULES="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES" ]; then
     python3 - "$RULES" << 'PYEOF'
-import sys
+import sys, re
 path = sys.argv[1]
 with open(path, 'r') as f: content = f.read()
 
@@ -566,8 +561,6 @@ else:
         with open(path, 'w') as f: f.write(content)
         print("  ✅ __maybe_unused ajouté sur pol/old_pol")
     else:
-        print(f"  ⚠️  Ligne exacte non trouvée, recherche par regex")
-        import re
         new_content = re.sub(
             r'struct selinux_policy\s*\*(\w+)\s*,\s*\*(\w+);',
             r'struct selinux_policy *\1 __maybe_unused, *\2 __maybe_unused;',
@@ -577,25 +570,74 @@ else:
             with open(path, 'w') as f: f.write(new_content)
             print("  ✅ __maybe_unused ajouté (regex)")
         else:
-            print("  ❌ Pas de match")
+            print("  ⚠️  Pas de match (peut-être déjà patché autrement)")
 PYEOF
-else
-    echo "  ❌ rules.c introuvable"
 fi
 
-# ==================== 3j. Diagnostic final ====================
+# ==================== 3j. FIX V7.13-D : stubs ksu_selinux_hide_* dans ksud.c (RESTAURÉ) ====================
 echo ""
-echo "=== DIAGNOSTIC FINAL ==="
-echo "--- sepolicy.c (5 premières lignes) ---"
-head -5 "$SEPOLICY" 2>/dev/null || echo "  ❌ absent"
-echo "--- kernel_compat.h : macro handle_sepolicy ? ---"
-grep -A2 'V7.12-HANDLE-SEPOLICY' "$COMPAT_H" 2>/dev/null || echo "  ❌ macro absente"
+echo "=== Fix V7.13-D : stubs ksu_selinux_hide_* dans ksud.c (RESTAURÉ) ==="
+
+KSUD_C="drivers/kernelsu/runtime/ksud.c"
+if [ -f "$KSUD_C" ]; then
+    python3 - "$KSUD_C" << 'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path, 'r') as f: content = f.read()
+
+# Vérifier si des stubs sont déjà là
+if 'static inline void ksu_selinux_hide_handle_post_fs_data(void) { }' in content:
+    print("  ✅ Stubs déjà présents")
+else:
+    stubs = '''
+/* V7.13 : stubs SUSFS pour build sans CONFIG_KSU_SUSFS */
+#ifndef CONFIG_KSU_SUSFS
+static inline void ksu_selinux_hide_handle_post_fs_data(void) { }
+static inline void ksu_selinux_hide_handle_second_stage(void) { }
+static inline void ksu_selinux_hide_drop_backup_if_unused(void) { }
+#endif
+'''
+    m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', content))
+    if m:
+        content = content[:m[-1].end()] + stubs + content[m[-1].end():]
+    else:
+        content = stubs + content
+    with open(path, 'w') as f: f.write(content)
+    print("  ✅ Stubs insérés (post_fs_data + second_stage + drop_backup_if_unused)")
+
+# Diagnostic
+with open(path, 'r') as f: lines = f.readlines()
+print("  --- 12 premières lignes ---")
+for i, l in enumerate(lines[:12], 1):
+    print(f"    L{i}: {l.rstrip()!r}")
+print("  --- occurrences ksu_selinux_hide ---")
+for i, l in enumerate(lines, 1):
+    if 'ksu_selinux_hide' in l:
+        print(f"    L{i}: {l.rstrip()!r}")
+PYEOF
+else
+    echo "  ❌ ksud.c introuvable"
+fi
+
+# ==================== 3k. Diagnostic final ====================
+echo ""
+echo "=== DIAGNOSTIC FINAL V7.13 ==="
+echo "--- kernel_compat.h : macro handle_sepolicy ? (doit être ABSENT) ---"
+if grep -q 'define handle_sepolicy' "$COMPAT_H" 2>/dev/null; then
+    echo "  ❌ Macro encore présente"
+else
+    echo "  ✅ Macro absente"
+fi
+echo "--- sepolicy.c : wrap présent ? ---"
+head -3 "$SEPOLICY" 2>/dev/null
 echo "--- rules.c : __maybe_unused ? ---"
-grep -n '__maybe_unused' "$RULES" 2>/dev/null | head -3 || echo "  ❌ absent"
+grep -n '__maybe_unused' "$RULES" 2>/dev/null | head -2 || echo "  (absent)"
+echo "--- ksud.c : stubs présents ? ---"
+grep -c 'ksu_selinux_hide_handle_post_fs_data(void) { }' "$KSUD_C" 2>/dev/null || echo "  0"
 
 # ==================== 4. CONFIGURATION ====================
 echo ""
-echo "=== Configuration (SukiSU-Ultra builtin, SANS SUSFS) ==="
+echo "=== Configuration ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -624,11 +666,10 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -5
 
-echo "=== État final .config ==="
 grep -E "KSU_MANUAL_HOOK|KSU_SUSFS|KSU_TAMPER|KSU_LSM|KALLSYMS|SECCOMP" out/.config | head -20 || true
 
 if ! grep -q "^CONFIG_KSU=y" out/.config; then
-    echo "❌ CONFIG_KSU non activé, abandon"; exit 1
+    echo "❌ CONFIG_KSU non activé"; exit 1
 fi
 
 # ==================== 5. PATCHS MOTOROLA ====================
@@ -653,7 +694,7 @@ fi
 
 # ==================== 7. COMPILATION KSUD ====================
 echo ""
-echo "=== Compilation ksud (SukiSU-Ultra builtin) ==="
+echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
@@ -741,10 +782,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v7.12-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.13-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v7.12 (SukiSU-Ultra builtin, SANS SUSFS) ==="
+echo "=== BUILD TERMINÉ v7.13 (SukiSU-Ultra builtin, SANS SUSFS) ==="
 ls -lh output/
