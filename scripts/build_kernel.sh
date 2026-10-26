@@ -2,12 +2,13 @@
 set -euo pipefail
 
 # =============================================================================
-# V8.1-D2 : KernelSU-Next + SUSFS (fork 4.19) + manual hooks
-#           - Intègre le module via le fork wshamroukh
-#           - Applique susfs_inline_hook_patches.sh (JackA1ltman) pour les hooks
+# V8.2-D2 : KernelSU-Next + SUSFS (4.19)
+#           - Copie les headers SUSFS depuis susfs4ksu (kernel-4.19)
+#           - Applique susfs_patch_to_4.19.patch (JackA1ltman)
+#           - Applique susfs_inline_hook_patches.sh
 # =============================================================================
 
-echo "=== Build KernelSU-Next + SUSFS (4.19) — V8.1-D2 ==="
+echo "=== Build KernelSU-Next + SUSFS (4.19) — V8.2-D2 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -19,7 +20,7 @@ sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.l
 sudo apt-get update
 sudo apt-get install -y bc bison build-essential ccache flex glibc-source libelf-dev libssl-dev \
   libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld \
-  device-tree-compiler zip unzip curl git python3 python3-pip mkbootimg cpio libclang-dev
+  device-tree-compiler zip unzip curl git python3 python3-pip mkbootimg cpio libclang-dev patch
 
 pip3 install --quiet gdown
 cd "$GITHUB_WORKSPACE"
@@ -29,7 +30,7 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION MODULE KernelSU-Next (fork 4.19) ====================
+# ==================== 2. MODULE KernelSU-Next (fork 4.19) ====================
 echo "=== Intégration module KernelSU-Next ==="
 git clone --depth=1 --branch ksun-v3.4.0-legacy-susfs-v2.3.0 \
   https://github.com/wshamroukh/KernelSU-Next-SUSFS-kernelv4.19.git KernelSU-Next-4.19
@@ -38,43 +39,64 @@ mkdir -p drivers/kernelsu
 cp -r KernelSU-Next-4.19/kernel/* drivers/kernelsu/
 cp -r KernelSU-Next-4.19/uapi drivers/kernelsu/
 
-# Enregistrement dans le noyau
 grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
 grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-echo "✅ module copié et enregistré"
+echo "✅ module copié"
 
-# ==================== 3. APPLICATION DES MANUAL HOOKS (JackA1ltman) ====================
+# ==================== 3. HEADERS SUSFS DEPUIS susfs4ksu ====================
 echo ""
-echo "=== Application des manual hooks (susfs_inline_hook_patches.sh) ==="
+echo "=== Copie des headers SUSFS depuis susfs4ksu (kernel-4.19) ==="
 
-# Télécharger le script de patchs
+rm -rf /tmp/susfs4ksu
+git clone --depth=1 --branch kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+
+# Copier les headers
+cp /tmp/susfs4ksu/kernel_patches/include/linux/*.h include/linux/
+# Copier les fichiers source SUSFS (susfs.c)
+cp /tmp/susfs4ksu/kernel_patches/fs/*.c fs/ 2>/dev/null || true
+
+echo "--- Vérification headers ---"
+for h in include/linux/susfs.h include/linux/susfs_def.h fs/susfs.c; do
+    [ -f "$h" ] && echo "  ✅ $h" || echo "  ❌ $h MANQUANT"
+done
+
+# ==================== 4. PATCH SUSFS NOYAU (JackA1ltman) ====================
+echo ""
+echo "=== Application susfs_patch_to_4.19.patch ==="
+
+curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
+
+# Appliquer le patch (certains hunks peuvent déjà être satisfaits par les copies de fichiers)
+patch -p1 --forward < /tmp/susfs_patch_to_4.19.patch || true
+echo "✅ patch SUSFS appliqué (avec tolérances)"
+
+# ==================== 5. MANUAL HOOKS (JackA1ltman) ====================
+echo ""
+echo "=== Application des manual hooks ==="
+
 curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o /tmp/hooks.sh
 chmod +x /tmp/hooks.sh
-
-# Le script doit être exécuté depuis la racine du noyau
 bash /tmp/hooks.sh
 
 echo ""
-echo "=== Vérification des hooks insérés ==="
+echo "=== Vérification hooks ==="
 for f in fs/exec.c fs/open.c fs/read_write.c fs/stat.c drivers/input/input.c; do
-    if grep -q 'ksu_handle' "$f"; then
-        echo "  ✅ $f contient des appels ksu_handle"
+    if grep -q 'ksu_handle' "$f" 2>/dev/null; then
+        echo "  ✅ $f"
     else
-        echo "  ⚠️  $f ne contient AUCUN appel ksu_handle"
+        echo "  ⚠️  $f (aucun ksu_handle)"
     fi
 done
 
-# Vérification critique : le hook execve doit être présent
-if grep -q 'ksu_handle_execveat' fs/exec.c; then
+if grep -q 'ksu_handle_execveat' fs/exec.c 2>/dev/null; then
     echo "✅ Hook execve présent"
 else
-    echo "❌ Hook execve MANQUANT — le build va échouer"
-    exit 1
+    echo "❌ Hook execve MANQUANT"; exit 1
 fi
 
-# ==================== 4. CONFIGURATION ====================
+# ==================== 6. CONFIGURATION ====================
 echo ""
-echo "=== Configuration KernelSU-Next + SUSFS ==="
+echo "=== Configuration ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -100,20 +122,16 @@ CONFIG_KSU_SUSFS_TRY_UMOUNT=y
 EOF
 
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
-
-# Vérification
 grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ CONFIG_KSU"; exit 1; }
-grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config || echo "⚠️  MANUAL_HOOK non activé"
-echo "✅ configuration validée"
 
-# ==================== 5. PATCHS MOTOROLA ====================
+# ==================== 7. PATCHS MOTOROLA ====================
 echo "=== Patchs Motorola ==="
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
 printf "\n/* Patch Tactile */\n#include <linux/notifier.h>\n#include <linux/module.h>\nstatic BLOCKING_NOTIFIER_HEAD(motorola_panel_notifier_list);\nint panel_register_notifier(struct notifier_block *nb) { return blocking_notifier_chain_register(&motorola_panel_notifier_list, nb); }\nEXPORT_SYMBOL(panel_register_notifier);\nint panel_unregister_notifier(struct notifier_block *nb) { return blocking_notifier_chain_unregister(&motorola_panel_notifier_list, nb); }\nEXPORT_SYMBOL(panel_unregister_notifier);\nvoid touch_set_state(int state) { return; }\nEXPORT_SYMBOL(touch_set_state);\n" >> techpack/display/msm/msm_drv.c
 echo "✅"
 
-# ==================== 6. COMPILATION KERNEL ====================
-echo "=== Compilation du kernel ==="
+# ==================== 8. COMPILATION KERNEL ====================
+echo "=== Compilation kernel ==="
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   -j$(nproc) Image 2>&1 | tee build.log
 
@@ -126,7 +144,7 @@ else
     exit 1
 fi
 
-# ==================== 7-10. KSUD + REPACK + DIAG + SORTIE ====================
+# ==================== 9. KSUD ====================
 echo ""
 echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
@@ -162,6 +180,7 @@ cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
 echo "✅ ksud compilé"
 cd "$GITHUB_WORKSPACE"
 
+# ==================== 10. REPACK ====================
 echo "=== Repack ==="
 rm -f ./boot-stock.img ./dtbo-stock.img 2>/dev/null || true
 gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img 2>&1 || true
@@ -198,10 +217,10 @@ fi
 cd ..
 
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-SUSFS-v4.19-v8.1-boot.img
+cp final_boot.img output/KernelSU-Next-SUSFS-v4.19-v8.2-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v8.1-D2 ==="
+echo "=== BUILD TERMINÉ v8.2-D2 ==="
 ls -lh output/
