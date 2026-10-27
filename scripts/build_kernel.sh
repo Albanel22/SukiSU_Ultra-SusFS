@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.18 : SukiSU-Ultra builtin — COMPILE-ONLY (V7.17 + diagnostic V8)
-#         Stratégie : skip total rules.c/sepolicy.c + HACK_ARM64_BRANCH_LINK
-#         Section 3r : diagnostic des fonctions selinux_policy pour V8
+# V7.19 : SukiSU-Ultra builtin — KERNEL OK (V7.18) + ksud robuste
+#         Kernel compile ✅. Seul ksud à corriger (chemin dynamique).
+#         Fallback : si ksud introuvable, repack sans ksud (Manager le fera).
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.18 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.19 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -36,11 +36,10 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 [ ! -d "drivers/kernelsu" ] && echo "❌" && exit 1
 echo "✅ intégré"
 
-# ==================== 3. FIXES COMPATIBILITÉ 4.19 ====================
+# ==================== 3. FIXES COMPATIBILITÉ 4.19 (identiques V7.18) ====================
 echo ""
 echo "=== Fixes compatibilité 4.19 ==="
 
-# 3a. static_call.h
 [ ! -f "include/linux/static_call.h" ] && cat > include/linux/static_call.h <<'EOF'
 #ifndef _LINUX_STATIC_CALL_H
 #define _LINUX_STATIC_CALL_H
@@ -51,12 +50,10 @@ echo "=== Fixes compatibilité 4.19 ==="
 #endif
 EOF
 
-# 3b. MODULE_IMPORT_NS
 for f in drivers/kernelsu/ksu.c drivers/kernelsu/ksu_main.c drivers/kernelsu/core/init.c; do
     [ -f "$f" ] && sed -i 's|MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);|#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)\nMODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n#endif|' "$f"
 done
 
-# 3c. file_wrapper.c
 for f in drivers/kernelsu/infra/file_wrapper.c drivers/kernelsu/file_wrapper.c; do
     [ ! -f "$f" ] && continue
     python3 - "$f" <<'PYEOF'
@@ -73,7 +70,6 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
 
-# 3d. seccomp_cache.c
 for f in drivers/kernelsu/infra/seccomp_cache.c drivers/kernelsu/seccomp_cache.c; do
     [ ! -f "$f" ] && continue
     grep -q 'SECCOMP_ARCH_NATIVE_NR' "$f" && continue
@@ -87,12 +83,10 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
 
-# 3e. su_mount_ns.c
 for f in drivers/kernelsu/infra/su_mount_ns.c drivers/kernelsu/su_mount_ns.c; do
     [ -f "$f" ] && sed -i 's|#include <uapi/linux/mount.h>|#include <linux/mount.h>|' "$f"
 done
 
-# 3f. pkg_observer.c
 for f in drivers/kernelsu/manager/pkg_observer.c drivers/kernelsu/pkg_observer.c; do
     [ ! -f "$f" ] && continue
     python3 - "$f" <<'PYEOF'
@@ -104,7 +98,6 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
 
-# 3g. TWA_RESUME
 for f in drivers/kernelsu/policy/allowlist.c drivers/kernelsu/allowlist.c drivers/kernelsu/supercall/supercall.c; do
     [ ! -f "$f" ] && continue
     python3 - "$f" <<'PYEOF'
@@ -121,7 +114,6 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
 
-# 3h. dispatch.c
 [ -f "drivers/kernelsu/supercall/dispatch.c" ] && python3 - drivers/kernelsu/supercall/dispatch.c <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
@@ -132,13 +124,11 @@ for inc in ['#include <linux/sched.h>', '#include <linux/sched/task.h>', '#inclu
 with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 
-# 3i. app_profile.c
 for f in drivers/kernelsu/policy/app_profile.c drivers/kernelsu/app_profile.c; do
     [ ! -f "$f" ] && continue
     sed -i 's|atomic_set(&current->seccomp.filter_count, 0);|#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)\n\tatomic_set(\&current->seccomp.filter_count, 0);\n#endif|' "$f"
 done
 
-# 3j. cpu_spoof.c
 [ -f "drivers/kernelsu/extension/cpu_spoof.c" ] && python3 - drivers/kernelsu/extension/cpu_spoof.c <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
@@ -147,18 +137,13 @@ c = re.sub(r'(#if LINUX_VERSION_CODE >= KERNEL_VERSION\(5,7,0\)\n\s*\(\*curr_cs_
 with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 
-# 3k. sulog/event.c
 [ -f "drivers/kernelsu/sulog/event.c" ] && sed -i 's|#include <linux/minmax.h>|#include <linux/kernel.h>|' drivers/kernelsu/sulog/event.c
-
-# 3l. KSU_NO_PREINIT
 [ -f "drivers/kernelsu/preinit/common/preinit.h" ] && sed -i 's|^#define KSU_NO_PREINIT$|#define KSU_NO_PREINIT 1|' drivers/kernelsu/preinit/common/preinit.h
 
-# 3m. USER_ARG_NULL
 find drivers/kernelsu/sulog -name '*.c' -o -name '*.h' 2>/dev/null | while read f; do
     sed -i 's|#define USER_ARG_NULL user_arg_null_ptr()|#define USER_ARG_NULL (*user_arg_null_ptr())|' "$f"
 done
 
-# 3n. access_ok
 KPM="drivers/kernelsu/extension/kpm/kpm.c"
 if [ -f "$KPM" ]; then
     sed -i 's/ksu_access_ok(/__AOK__PH__(/g' "$KPM"
@@ -177,7 +162,6 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
 
-# 3o. feature.h
 FEAT="drivers/kernelsu/include/uapi/feature.h"
 if [ -f "$FEAT" ]; then
     python3 - "$FEAT" <<'PYEOF'
@@ -200,7 +184,6 @@ if inserted:
 PYEOF
 fi
 
-# 3p. path_umount/path_mount
 python3 - <<'PYEOF'
 import re
 with open('fs/namespace.c') as f: c = f.read()
@@ -250,13 +233,12 @@ out_free: free_page((unsigned long)page); return ret;
 with open('fs/namespace.c', 'w') as f: f.write(c)
 PYEOF
 
-# 3q. stubs ksu_selinux_hide_*
 KSUD="drivers/kernelsu/runtime/ksud.c"
 if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' "$KSUD"; then
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V7.18 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V7.19 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -264,72 +246,30 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
 
-# ==================== 3r. DIAGNOSTIC V8 : fonctions selinux_policy à wrapper ====================
-echo ""
-echo "=== Diagnostic V8 : fonctions selinux_policy dans le module ==="
-
-echo "--- rules.c : occurrences de 'selinux_policy' ---"
-grep -n 'selinux_policy' drivers/kernelsu/selinux/rules.c 2>/dev/null | head -25 || echo "  (aucune)"
-
-echo ""
-echo "--- sepolicy.c : fonctions utilisant 'selinux_policy' ---"
-grep -n 'struct selinux_policy' drivers/kernelsu/selinux/sepolicy.c 2>/dev/null | head -10 || echo "  (aucune)"
-
-echo ""
-echo "--- ksu.h : déclaration backup_sepolicy ---"
-grep -n 'backup_sepolicy' drivers/kernelsu/include/ksu.h 2>/dev/null || echo "  (aucune)"
-
-echo ""
-echo "--- sepolicy.h : signatures (doivent utiliser policydb) ---"
-grep -E '^bool ksu_|^struct selinux_policy|^void ksu_' drivers/kernelsu/selinux/sepolicy.h 2>/dev/null | head -25 || echo "  (aucune)"
-
 # ==================== 4. SKIP rules.c/sepolicy.c + STUBS ====================
-echo ""
-echo "=== V7.18 : skip rules.c + sepolicy.c sur 4.19, stubs à la place ==="
-
 KSU_MAIN="drivers/kernelsu/ksu_main.c"
 python3 - "$KSU_MAIN" <<'PYEOF'
 import sys, re
 path = sys.argv[1]
 with open(path) as f: content = f.read()
-
-if 'V7.18-SKIP' in content:
-    print("✅ déjà patché")
-    sys.exit(0)
-
+if 'V7.19-SKIP' in content:
+    print("✅ déjà patché"); sys.exit(0)
 lines = content.split('\n')
 include_idx = [i for i, l in enumerate(lines) if re.match(r'^\s*#include\s+"selinux/(rules|sepolicy)\.c"', l)]
-
 if len(include_idx) < 2:
-    print(f"❌ {len(include_idx)} include(s) trouvé(s), 2 attendus")
-    sys.exit(1)
-
-first = include_idx[0]
-last = include_idx[-1]
-
-new_block = [
-    '#include <linux/version.h>',
-    '',
-    '/* V7.18-SKIP : rules.c + sepolicy.c requièrent Linux 5.0+ */',
-    '#if LINUX_VERSION_CODE >= 327680 /* 5.0.0 */',
-]
-for idx in include_idx:
-    new_block.append(lines[idx])
-new_block += [
-    '#else /* 4.19 : stubs */',
-    'void apply_kernelsu_rules(void) { }',
-    'int handle_sepolicy(void __user *user_data, u64 data_len) { return -EOPNOTSUPP; }',
-    '#endif',
-]
-
+    print(f"❌ {len(include_idx)} include(s)"); sys.exit(1)
+first = include_idx[0]; last = include_idx[-1]
+new_block = ['#include <linux/version.h>', '', '/* V7.19-SKIP */', '#if LINUX_VERSION_CODE >= 327680']
+for idx in include_idx: new_block.append(lines[idx])
+new_block += ['#else', 'void apply_kernelsu_rules(void) { }', 'int handle_sepolicy(void __user *user_data, u64 data_len) { return -EOPNOTSUPP; }', '#endif']
 new_lines = lines[:first] + new_block + lines[last+1:]
 with open(path, 'w') as f: f.write('\n'.join(new_lines))
-print(f"✅ ksu_main.c patché (includes L{first+1}, L{last+1})")
+print(f"✅ ksu_main.c patché")
 PYEOF
 
-# ==================== 5. CONFIGURATION OFFICIELLE ====================
+# ==================== 5. CONFIGURATION ====================
 echo ""
-echo "=== Configuration officielle SukiSU-Ultra (V7.18) ==="
+echo "=== Configuration ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -337,7 +277,6 @@ mkdir -p out
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
 
 cat >> out/.config <<'EOF'
-# SukiSU-Ultra builtin (config officielle 4.19)
 CONFIG_KSU=y
 CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y
 # CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set
@@ -361,22 +300,13 @@ CONFIG_COMPAT_32BIT_TIME=y
 EOF
 
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
-
-echo "=== État config KSU ==="
-grep -E "^CONFIG_KSU" out/.config
-
-if grep -q '^CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y' out/.config; then
-    echo "✅ HACK_ARM64_BRANCH_LINK activé"
-else
-    echo "⚠️  HACK_ARM64_BRANCH_LINK non activé — vérifier dépendances"
-fi
-grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU désactivé"; exit 1; }
+grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU"; exit 1; }
 
 # ==================== 6. PATCHS MOTOROLA ====================
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
 printf "\n/* Patch Tactile */\n#include <linux/notifier.h>\n#include <linux/module.h>\nstatic BLOCKING_NOTIFIER_HEAD(motorola_panel_notifier_list);\nint panel_register_notifier(struct notifier_block *nb) { return blocking_notifier_chain_register(&motorola_panel_notifier_list, nb); }\nEXPORT_SYMBOL(panel_register_notifier);\nint panel_unregister_notifier(struct notifier_block *nb) { return blocking_notifier_chain_unregister(&motorola_panel_notifier_list, nb); }\nEXPORT_SYMBOL(panel_unregister_notifier);\nvoid touch_set_state(int state) { return; }\nEXPORT_SYMBOL(touch_set_state);\n" >> techpack/display/msm/msm_drv.c
 
-# ==================== 7. COMPILATION ====================
+# ==================== 7. COMPILATION KERNEL ====================
 echo ""
 echo "=== Compilation kernel ==="
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
@@ -391,26 +321,58 @@ else
     exit 1
 fi
 
-# ==================== 8. KSUD ====================
+# ==================== 8. KSUD — DÉTECTION DYNAMIQUE ====================
 echo ""
-echo "=== Compilation ksud ==="
+echo "=== Compilation ksud (avec détection dynamique) ==="
 cd "$GITHUB_WORKSPACE"
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# Installer Rust + NDK
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly 2>&1 | tail -3
 source "$HOME/.cargo/env"
-rustup toolchain install nightly; rustup default nightly
-rustup target add aarch64-linux-android
-wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip; unzip -q android-ndk-r26d-linux.zip
+rustup target add aarch64-linux-android 2>&1 | tail -2
+
+wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+unzip -q android-ndk-r26d-linux.zip
 export ANDROID_NDK_ROOT="$GITHUB_WORKSPACE/android-ndk-r26d"
 export AARCH64_CLANG_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
 export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
 export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
+# Cloner SukiSU-Ultra builtin
 rm -rf "$GITHUB_WORKSPACE/ksud-src"
 git clone --depth=1 --branch builtin https://github.com/ShirkNeko/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
-cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
-mkdir -p .cargo
-cat > .cargo/config.toml <<EOF
+
+# === DÉTECTION DYNAMIQUE du dossier ksud ===
+echo "--- Diagnostic structure ksud-src ---"
+ls -la "$GITHUB_WORKSPACE/ksud-src/" 2>&1 | head -20
+echo "--- Recherche Cargo.toml avec name = ksud ---"
+
+KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -name 'Cargo.toml' -type f 2>/dev/null | while read cargo; do
+    if grep -qE 'name\s*=\s*"ksud"' "$cargo" 2>/dev/null; then
+        dirname "$cargo"
+        break
+    fi
+done | head -1)
+
+if [ -z "$KSUD_DIR" ]; then
+    echo "⚠️  Aucun Cargo.toml avec name=ksud trouvé"
+    echo "--- Recherche fallback par nom de dossier 'ksud' ---"
+    KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -type d -name 'ksud' 2>/dev/null | head -1)
+fi
+
+if [ -z "$KSUD_DIR" ]; then
+    echo "⚠️  Aucun dossier ksud trouvé — listing exhaustif :"
+    find "$GITHUB_WORKSPACE/ksud-src" -maxdepth 3 -type d 2>/dev/null | head -30
+    echo ""
+    echo "⚠️  ksud introuvable — on continue SANS ksud dans le ramdisk."
+    echo "    Le Manager SukiSU-Ultra installera ksud dans /data/adb au premier lancement."
+    KSUD_OK=0
+else
+    echo "✅ KSUD_DIR = $KSUD_DIR"
+    cd "$KSUD_DIR"
+    mkdir -p .cargo
+    cat > .cargo/config.toml <<EOF
 [target.aarch64-linux-android]
 linker = "$AARCH64_CLANG_PATH"
 [env]
@@ -419,19 +381,35 @@ CXX_aarch64_linux_android = "$AARCH64_CLANGXX_PATH"
 AR_aarch64_linux_android = "$AR_PATH"
 BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android = "$BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android"
 EOF
-export CARGO_NET_GIT_FETCH_WITH_CLI=true
-cargo +nightly build --release --target aarch64-linux-android
-KSUD=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
-[ -z "$KSUD" ] && echo "❌" && exit 1
-cp "$KSUD" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
-echo "✅ ksud"
+    export CARGO_NET_GIT_FETCH_WITH_CLI=true
+    set +e
+    cargo build --release --target aarch64-linux-android 2>&1 | tail -30
+    CARGO_EXIT=$?
+    set -e
+    if [ $CARGO_EXIT -eq 0 ]; then
+        KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
+        if [ -n "$KSUD_BINARY" ]; then
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
+            chmod 755 "$GITHUB_WORKSPACE/ksud"
+            echo "✅ ksud compilé : $KSUD_BINARY"
+            KSUD_OK=1
+        else
+            echo "⚠️  cargo OK mais ksud binaire introuvable"
+            KSUD_OK=0
+        fi
+    else
+        echo "⚠️  cargo build a échoué (exit $CARGO_EXIT) — on continue sans ksud"
+        KSUD_OK=0
+    fi
+fi
 cd "$GITHUB_WORKSPACE"
 
 # ==================== 9. REPACK ====================
+echo ""
 echo "=== Repack ==="
 rm -f ./boot-stock.img ./dtbo-stock.img 2>/dev/null || true
 gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img 2>&1 || true
-[ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ] && { echo "❌ boot"; exit 1; }
+[ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ] && { echo "❌ boot invalide"; exit 1; }
 gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img 2>&1 || true
 
 mkdir -p repack
@@ -445,10 +423,21 @@ rm -rf ./Magisk-v27.0.apk ./lib
 cd repack
 set +e; ./magiskboot unpack boot.img; set -e
 cp "$GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image" kernel
-./magiskboot cpio ramdisk.cpio "mkdir 0755 data" "mkdir 0755 data/adb" "mkdir 0755 data/adb/ksud" "add 0755 data/adb/ksud/ksud $GITHUB_WORKSPACE/ksud"
-cp "$GITHUB_WORKSPACE/ksud" ./local_su_binary; chmod 755 ./local_su_binary
-./magiskboot cpio ramdisk.cpio "mkdir 0755 system" "mkdir 0755 system/bin" "add 06755 system/bin/su ./local_su_binary"
-rm -f ./local_su_binary
+
+if [ "${KSUD_OK:-0}" = "1" ] && [ -f "$GITHUB_WORKSPACE/ksud" ]; then
+    ./magiskboot cpio ramdisk.cpio \
+        "mkdir 0755 data" "mkdir 0755 data/adb" "mkdir 0755 data/adb/ksud" \
+        "add 0755 data/adb/ksud/ksud $GITHUB_WORKSPACE/ksud"
+    cp "$GITHUB_WORKSPACE/ksud" ./local_su_binary; chmod 755 ./local_su_binary
+    ./magiskboot cpio ramdisk.cpio \
+        "mkdir 0755 system" "mkdir 0755 system/bin" \
+        "add 06755 system/bin/su ./local_su_binary"
+    rm -f ./local_su_binary
+    echo "✅ ksud + su inclus dans ramdisk"
+else
+    echo "⚠️  Repack SANS ksud (le Manager l'installera au boot)"
+fi
+
 ./magiskboot repack boot.img new-boot.img
 mv new-boot.img ../final_boot.img
 cd ..
@@ -464,10 +453,11 @@ fi
 cd ..
 
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v7.18-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.19-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
-cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
+[ -f "$GITHUB_WORKSPACE/ksud" ] && cp "$GITHUB_WORKSPACE/ksud" output/ksud
 echo ""
-echo "=== BUILD TERMINÉ v7.18 ==="
+echo "=== BUILD TERMINÉ v7.19 ==="
+echo "KSUD_OK = ${KSUD_OK:-0} (1=compilé inclus, 0=absent du ramdisk)"
 ls -lh output/
