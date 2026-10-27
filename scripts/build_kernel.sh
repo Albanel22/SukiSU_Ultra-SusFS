@@ -2,11 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.23 : SukiSU-Ultra builtin — Backport SELinux 4.19 + Manual Hooks (COMPLET)
-#         Objectif : que le Manager affiche "Hook type: Manual"
+# V7.24 : SukiSU-Ultra builtin — Backport SELinux 4.19 + Manual Hooks (FIX PATHS)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.23 (Backport SELinux) ==="
+echo "=== Build SukiSU-Ultra builtin — V7.24 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -255,7 +254,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V7.23 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V7.24 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -413,7 +412,6 @@ EOF
 
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
 grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU"; exit 1; }
-# L'avertissement MANUAL_HOOK est normal sur les versions récentes, les hooks sont gérés par le code source.
 
 # ==================== 7. PATCHS MOTOROLA ====================
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
@@ -436,10 +434,10 @@ else
 fi
 
 # ==================== 9. SAUVEGARDE DU NOYAU (SÉCURISÉ) ====================
-mkdir -p output
-cp out/arch/arm64/boot/Image output/Image-v7.23
-cp out/System.map output/System.map-v7.23
-echo "✅ Noyau (Image) sauvegardé dans output/"
+mkdir -p "$GITHUB_WORKSPACE/output"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.24"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.24"
+echo "✅ Noyau (Image) sauvegardé dans $GITHUB_WORKSPACE/output/"
 
 # ==================== 10. COMPILATION KSUD ====================
 echo ""
@@ -483,6 +481,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v7.24"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -503,7 +502,7 @@ gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable (Google Drive bloqué)."
-    echo "⚠️ On saute le repack, mais ton fichier Image est SAUVEGARDÉ dans output/Image-v7.23"
+    echo "⚠️ On saute le repack, mais ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v7.24"
     exit 0
 fi
 
@@ -534,12 +533,12 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-builtin-v7.23-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-builtin-v7.24-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké avec succès"
 set -e
 
 # ==================== 12. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v7.23 ==="
-ls -lh output/
+echo "=== BUILD TERMINÉ v7.24 ==="
+ls -lh "$GITHUB_WORKSPACE/output/"
