@@ -263,22 +263,43 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
 
-# ==================== 4. BACKPORT SELINUX 4.19 (NOUVEAU V7.22) ====================
+# ==================== 4. BACKPORT SELINUX 4.19 (CORRIGÉ V7.22) ====================
 echo ""
 echo "=== Backport SELinux pour 4.19 (rules.c + sepolicy.c) ==="
 
-# 4a. rules.c : remplacer struct selinux_policy par struct policydb
+# 4a. rules.c : injecter la macro de compatibilité et corriger get_policydb
 RULES="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES" ]; then
     python3 - "$RULES" <<'PYEOF'
 import sys, re
-with open(sys.argv[1]) as f: c = f.read()
-# Remplacer les déclarations de struct selinux_policy
-c = re.sub(r'struct selinux_policy \*(\w+)', r'struct policydb *\1', c)
-# Remplacer les accès aux champs (policy->policydb devient policy)
-c = re.sub(r'(\w+)->policydb', r'\1', c)
-with open(sys.argv[1], 'w') as f: f.write(c)
-print("  ✅ rules.c adapté pour 4.19 (policydb)")
+path = sys.argv[1]
+with open(path) as f: c = f.read()
+
+# 1. Ajouter la macro de compatibilité après les includes
+if 'SELINUX_POLICY_INSTEAD_SELINUX_SS' not in c:
+    # Trouver la fin des includes
+    m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', c)
+    if m:
+        compat = '\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n#define SELINUX_POLICY_INSTEAD_SELINUX_SS\n#endif\n'
+        c = c[:m.end()] + compat + c[m.end():]
+
+# 2. Corriger la fonction get_policydb (remplacer la logique défectueuse)
+# On cible la fonction qui contient "return &selinux_state.ss;"
+c = c.replace(
+    'return &selinux_state.ss;',
+    '''#ifdef SELINUX_POLICY_INSTEAD_SELINUX_SS
+    return &rcu_dereference(selinux_state.policy)->policydb;
+#else
+    return &rcu_dereference(selinux_state.ss)->policydb;
+#endif'''
+)
+
+# 3. S'assurer que les appels à get_policydb() sont protégés par rcu_read_lock si nécessaire
+# (Optionnel, mais recommandé pour la stabilité)
+# On ne touche pas au reste du fichier, les types policydb sont déjà gérés.
+
+with open(path, 'w') as f: f.write(c)
+print("  ✅ rules.c adapté pour 4.19 (get_policydb corrigé)")
 PYEOF
 fi
 
@@ -287,12 +308,15 @@ SEPOLICY="drivers/kernelsu/selinux/sepolicy.c"
 if [ -f "$SEPOLICY" ]; then
     python3 - "$SEPOLICY" <<'PYEOF'
 import sys, re
-with open(sys.argv[1]) as f: c = f.read()
-# Remplacer les déclarations de struct selinux_policy
+path = sys.argv[1]
+with open(path) as f: c = f.read()
+
+# Remplacer les déclarations de struct selinux_policy par struct policydb
 c = re.sub(r'struct selinux_policy \*(\w+)', r'struct policydb *\1', c)
-# Remplacer les accès aux champs
+# Remplacer les accès aux champs (policy->policydb devient policy)
 c = re.sub(r'(\w+)->policydb', r'\1', c)
-with open(sys.argv[1], 'w') as f: f.write(c)
+
+with open(path, 'w') as f: f.write(c)
 print("  ✅ sepolicy.c adapté pour 4.19 (policydb)")
 PYEOF
 fi
