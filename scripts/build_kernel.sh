@@ -2,11 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.20 : SukiSU-Ultra builtin — MANUAL HOOKS + ksud robuste
-#         Objectif : que le Manager affiche "Hook type: Manual"
+# V7.21 : SukiSU-Ultra builtin — MANUAL HOOKS + fix declaration-after-statement
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.20 (Manual Hooks) ==="
+echo "=== Build SukiSU-Ultra builtin — V7.21 (Manual Hooks) ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -255,7 +254,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V7.20 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V7.21 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -263,9 +262,9 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
 
-# ==================== 4. INJECTION MANUAL HOOKS (V7.20) ====================
+# ==================== 4. INJECTION MANUAL HOOKS (V7.21) ====================
 echo ""
-echo "=== Injection des manual hooks (pour que le Manager détecte) ==="
+echo "=== Injection des manual hooks ==="
 
 # 4a. fs/exec.c
 EXEC_C="fs/exec.c"
@@ -339,14 +338,14 @@ python3 - "$KSU_MAIN" <<'PYEOF'
 import sys, re
 path = sys.argv[1]
 with open(path) as f: content = f.read()
-if 'V7.20-SKIP' in content:
+if 'V7.21-SKIP' in content:
     print("✅ déjà patché"); sys.exit(0)
 lines = content.split('\n')
 include_idx = [i for i, l in enumerate(lines) if re.match(r'^\s*#include\s+"selinux/(rules|sepolicy)\.c"', l)]
 if len(include_idx) < 2:
     print(f"❌ {len(include_idx)} include(s)"); sys.exit(1)
 first = include_idx[0]; last = include_idx[-1]
-new_block = ['#include <linux/version.h>', '', '/* V7.20-SKIP */', '#if LINUX_VERSION_CODE >= 327680']
+new_block = ['#include <linux/version.h>', '', '/* V7.21-SKIP */', '#if LINUX_VERSION_CODE >= 327680']
 for idx in include_idx: new_block.append(lines[idx])
 new_block += ['#else', 'void apply_kernelsu_rules(void) { }', 'int handle_sepolicy(void __user *user_data, u64 data_len) { return -EOPNOTSUPP; }', '#endif']
 new_lines = lines[:first] + new_block + lines[last+1:]
@@ -354,9 +353,9 @@ with open(path, 'w') as f: f.write('\n'.join(new_lines))
 print(f"✅ ksu_main.c patché")
 PYEOF
 
-# ==================== 6. CONFIGURATION (SANS HACK_ARM64) ====================
+# ==================== 6. CONFIGURATION ====================
 echo ""
-echo "=== Configuration SukiSU-Ultra (Manual Hooks) ==="
+echo "=== Configuration SukiSU-Ultra ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -393,11 +392,12 @@ grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU"; exit 1; }
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
 printf "\n/* Patch Tactile */\n#include <linux/notifier.h>\n#include <linux/module.h>\nstatic BLOCKING_NOTIFIER_HEAD(motorola_panel_notifier_list);\nint panel_register_notifier(struct notifier_block *nb) { return blocking_notifier_chain_register(&motorola_panel_notifier_list, nb); }\nEXPORT_SYMBOL(panel_register_notifier);\nint panel_unregister_notifier(struct notifier_block *nb) { return blocking_notifier_chain_unregister(&motorola_panel_notifier_list, nb); }\nEXPORT_SYMBOL(panel_unregister_notifier);\nvoid touch_set_state(int state) { return; }\nEXPORT_SYMBOL(touch_set_state);\n" >> techpack/display/msm/msm_drv.c
 
-# ==================== 8. COMPILATION KERNEL ====================
+# ==================== 8. COMPILATION KERNEL (avec fix C89) ====================
 echo ""
 echo "=== Compilation kernel ==="
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-  KCFLAGS="-Wno-macro-redefined -Wno-unused-variable" -j$(nproc) Image 2>&1 | tee build.log
+  KCFLAGS="-Wno-macro-redefined -Wno-unused-variable -Wno-declaration-after-statement" \
+  -j$(nproc) Image 2>&1 | tee build.log
 
 if [ -f "out/arch/arm64/boot/Image" ]; then
     echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
@@ -408,9 +408,9 @@ else
     exit 1
 fi
 
-# ==================== 9. KSUD — DÉTECTION DYNAMIQUE ====================
+# ==================== 9. KSUD ====================
 echo ""
-echo "=== Compilation ksud (avec détection dynamique) ==="
+echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly 2>&1 | tail -3
@@ -437,15 +437,12 @@ KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -name 'Cargo.toml' -type f 2>/dev/n
 done | head -1)
 
 if [ -z "$KSUD_DIR" ]; then
-    echo "⚠️  Aucun Cargo.toml avec name=ksud trouvé"
     KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -type d -name 'ksud' 2>/dev/null | head -1)
 fi
 
 if [ -z "$KSUD_DIR" ]; then
-    echo "⚠️  ksud introuvable — on continue SANS ksud dans le ramdisk."
     KSUD_OK=0
 else
-    echo "✅ KSUD_DIR = $KSUD_DIR"
     cd "$KSUD_DIR"
     mkdir -p .cargo
     cat > .cargo/config.toml <<EOF
@@ -467,14 +464,11 @@ EOF
         if [ -n "$KSUD_BINARY" ]; then
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
-            echo "✅ ksud compilé : $KSUD_BINARY"
             KSUD_OK=1
         else
-            echo "⚠️  cargo OK mais ksud binaire introuvable"
             KSUD_OK=0
         fi
     else
-        echo "⚠️  cargo build a échoué (exit $CARGO_EXIT) — on continue sans ksud"
         KSUD_OK=0
     fi
 fi
@@ -529,11 +523,10 @@ fi
 cd ..
 
 mkdir -p output
-cp final_boot.img output/SukiSU-Ultra-builtin-v7.20-boot.img
+cp final_boot.img output/SukiSU-Ultra-builtin-v7.21-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 [ -f "$GITHUB_WORKSPACE/ksud" ] && cp "$GITHUB_WORKSPACE/ksud" output/ksud
 echo ""
-echo "=== BUILD TERMINÉ v7.20 ==="
-echo "KSUD_OK = ${KSUD_OK:-0} (1=compilé inclus, 0=absent du ramdisk)"
+echo "=== BUILD TERMINÉ v7.21 ==="
 ls -lh output/
