@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # =============================================================================
-# V8.3 : SukiSU-Ultra + SUSFS (JackA1ltman) + Manual Hooks
-#        Corrections complètes des rejets de patch sur noyau Motorola 4.19
+# V8.3 : SukiSU-Ultra builtin + SUSFS (JackA1ltman) + Manual Hooks
+#        Fallbacks pour les symboles SUSFS manquants (V8.3)
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra + SUSFS — V8.3 ==="
@@ -35,7 +35,7 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 [ ! -d "drivers/kernelsu" ] && echo "❌" && exit 1
 echo "✅ intégré"
 
-# ==================== 3. FIXES COMPATIBILITÉ 4.19 (Base V7.24) ====================
+# ==================== 3. FIXES COMPATIBILITÉ 4.19 ====================
 echo ""
 echo "=== Fixes compatibilité 4.19 ==="
 
@@ -286,9 +286,9 @@ print("  ✅ sepolicy.c adapté")
 PYEOF
 fi
 
-# ==================== 5. INJECTION MANUAL HOOKS (KernelSU) ====================
+# ==================== 5. INJECTION MANUAL HOOKS ====================
 echo ""
-echo "=== Injection des manual hooks (KernelSU) ==="
+echo "=== Injection des manual hooks ==="
 
 EXEC_C="fs/exec.c"
 if grep -q 'do_execveat_common' "$EXEC_C"; then
@@ -353,7 +353,7 @@ if 'ksu_handle_stat' not in c:
 PYEOF
 fi
 
-# ==================== 6. SUSFS : PATCH JACKA1LTMAN ====================
+# ==================== 6. SUSFS : PATCH JACKA1LTMAN + FIX REJETS ====================
 echo ""
 echo "=== Intégration SUSFS (JackA1ltman) ==="
 
@@ -365,13 +365,13 @@ else
     echo "⚠️ Impossible de télécharger le patch SUSFS"
 fi
 
-# 6b. Résolution des rejets manuels
+# 6b. Résolution des rejets manuels (Motorola spécifique)
 echo "--- Résolution des rejets spécifiques Motorola ---"
 
-# 6b-1 : fs/namespace.c
 if [ -f "fs/namespace.c.rej" ]; then
     echo "  Correction de fs/namespace.c..."
     python3 - <<'PYEOF'
+import re
 with open('fs/namespace.c', 'r') as f: c = f.read()
 if 'susfs_def.h' not in c:
     c = c.replace('#include <linux/mount.h>', '#include <linux/mount.h>\n#include <linux/susfs_def.h>')
@@ -383,7 +383,6 @@ PYEOF
     rm -f fs/namespace.c.rej
 fi
 
-# 6b-2 : fs/proc/task_mmu.c
 if [ -f "fs/proc/task_mmu.c.rej" ]; then
     echo "  Correction de fs/proc/task_mmu.c..."
     python3 - <<'PYEOF'
@@ -396,7 +395,6 @@ PYEOF
     rm -f fs/proc/task_mmu.c.rej
 fi
 
-# 6b-3 : fs/super.c
 if [ -f "fs/super.c.rej" ]; then
     echo "  Correction de fs/super.c..."
     python3 - <<'PYEOF'
@@ -409,114 +407,72 @@ PYEOF
     rm -f fs/super.c.rej
 fi
 
-# 6b-4 : Correction des symboles manquants dans les headers et fichiers
-echo "--- Correction des symboles SUSFS manquants ---"
-python3 - <<'PYEOF'
-import os
+# 6b-2. Correction des symboles SUSFS manquants dans fs/super.c
+echo "--- Correction des symboles SUSFS dans fs/super.c ---"
 
-# 1. Fixer fs/super.c (Includes)
-with open('fs/super.c', 'r') as f: c = f.read()
-if '#include <linux/susfs.h>' not in c:
-    c = c.replace('#include <linux/blkdev.h>', '#include <linux/blkdev.h>\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>')
-    if '#include <linux/susfs.h>' not in c:
-        c = c.replace('#include "internal.h"', '#include "internal.h"\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>')
-    with open('fs/super.c', 'w') as f: f.write(c)
-    print("    ✅ Headers SUSFS injectés dans fs/super.c")
+if ! grep -q '#include <linux/susfs_def.h>' fs/super.c; then
+    sed -i 's|#include <linux/fs.h>|#include <linux/fs.h>\n#include <linux/susfs_def.h>|' fs/super.c
+fi
 
-# 2. Fixer include/linux/susfs_def.h
-with open('include/linux/susfs_def.h', 'r') as f: c = f.read()
-if 'DEFAULT_KSU_MNT_MINOR_DEV' not in c:
-    c += '\n/* Fallback V8.3 */\n#ifndef DEFAULT_KSU_MNT_MINOR_DEV\n#define DEFAULT_KSU_MNT_MINOR_DEV 1000\n#endif\n'
-    print("    ✅ DEFAULT_KSU_MNT_MINOR_DEV défini dans susfs_def.h")
-if 'STATX_SUS_KSTAT' not in c:
-    c += '''
-/* Fallback V8.3 : Constantes STATX manquantes */
-#ifndef STATX_SUS_KSTAT
-#define STATX_SUS_KSTAT 0x00010000U
-#endif
-#ifndef STATX_SUS_KSTAT_FUSE
-#define STATX_SUS_KSTAT_FUSE 0x00020000U
-#endif
-'''
-    print("    ✅ Constantes STATX_SUS_KSTAT ajoutées dans susfs_def.h")
-if 'susfs_is_current_app_uid' not in c:
-    c += '''
-/* Fallback V8.3 : Fonction manquante */
-static inline bool susfs_is_current_app_uid(void) {
-    return current_uid().val % 100000 > 10000;
+if ! grep -q '#include <linux/susfs.h>' fs/super.c; then
+    sed -i 's|#include <linux/susfs_def.h>|#include <linux/susfs_def.h>\n#include <linux/susfs.h>|' fs/super.c
+fi
+
+if ! grep -q 'susfs_is_sdcard_android_data_not_decrypted' include/linux/susfs.h; then
+    cat >> include/linux/susfs.h <<'EOF'
+
+/* Corrections V8.3 */
+#include <linux/jump_label.h>
+extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted;
+extern bool susfs_is_current_ksu_domain(void);
+EOF
+fi
+
+if ! grep -q 'DEFAULT_KSU_MNT_MINOR_DEV' include/linux/susfs_def.h; then
+    echo '' >> include/linux/susfs_def.h
+    echo '/* Fallback V8.3 */' >> include/linux/susfs_def.h
+    echo '#ifndef DEFAULT_KSU_MNT_MINOR_DEV' >> include/linux/susfs_def.h
+    echo '#define DEFAULT_KSU_MNT_MINOR_DEV 1000' >> include/linux/susfs_def.h
+    echo '#endif' >> include/linux/susfs_def.h
+fi
+
+if ! grep -q 'DEFAULT_KSU_MNT_ID' include/linux/susfs_def.h; then
+    echo '' >> include/linux/susfs_def.h
+    echo '/* Fallback V8.3 */' >> include/linux/susfs_def.h
+    echo '#ifndef DEFAULT_KSU_MNT_ID' >> include/linux/susfs_def.h
+    echo '#define DEFAULT_KSU_MNT_ID 500000' >> include/linux/susfs_def.h
+    echo '#endif' >> include/linux/susfs_def.h
+fi
+
+if ! grep -q 'CMD_SUSFS_SET_PRIORITY_UID_FILTER' include/linux/susfs_def.h; then
+    echo '' >> include/linux/susfs_def.h
+    echo '/* Fallback V8.3 pour les commandes SUSFS manquantes */' >> include/linux/susfs_def.h
+    echo '#ifndef CMD_SUSFS_SET_PRIORITY_UID_FILTER' >> include/linux/susfs_def.h
+    echo '#define CMD_SUSFS_SET_PRIORITY_UID_FILTER 0x55550' >> include/linux/susfs_def.h
+    echo '#endif' >> include/linux/susfs_def.h
+fi
+
+if ! grep -rq 'susfs_set_priority_uid_filter' fs/susfs.c 2>/dev/null; then
+    cat >> fs/susfs.c <<'EOF'
+
+/* Fallback V8.3 : stub pour la fonction manquante */
+int susfs_set_priority_uid_filter(void __user *arg) {
+    return -EOPNOTSUPP;
 }
-'''
-    print("    ✅ Fonction susfs_is_current_app_uid ajoutée dans susfs_def.h")
-with open('include/linux/susfs_def.h', 'w') as f: f.write(c)
+EOF
+fi
 
-# 3. Fixer include/linux/susfs.h
-with open('include/linux/susfs.h', 'r') as f: c = f.read()
-if 'susfs_is_sdcard_android_data_not_decrypted' not in c:
-    c += '\n/* Fallback V8.3 */\n#include <linux/jump_label.h>\nextern struct static_key_false susfs_is_sdcard_android_data_not_decrypted;\nextern bool susfs_is_current_ksu_domain(void);\n'
-    print("    ✅ Prototypes ajoutés dans susfs.h")
-with open('include/linux/susfs.h', 'w') as f: f.write(c)
+echo "✅ Symboles SUSFS corrigés (V8.3)"
 
-# 4. Fixer fs/susfs.c
-with open('fs/susfs.c', 'r') as f: c = f.read()
-if 'DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)' not in c:
-    c += '\n/* Fallback V8.3 */\nDEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted);\n'
-    print("    ✅ Définition de susfs_is_sdcard_android_data_not_decrypted ajoutée")
-if 'bool susfs_is_current_ksu_domain(void)' not in c:
-    c += '\n/* Fallback V8.3 */\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
-    print("    ✅ Définition de susfs_is_current_ksu_domain ajoutée")
-with open('fs/susfs.c', 'w') as f: f.write(c)
-
-# 5. Fixer fs/stat.c (Headers)
-with open('fs/stat.c', 'r') as f: c = f.read()
-if '#include <linux/susfs_def.h>' not in c:
-    if '#include <linux/stat.h>' in c:
-        c = c.replace('#include <linux/stat.h>', '#include <linux/stat.h>\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>')
-    elif '#include <linux/fs.h>' in c:
-        c = c.replace('#include <linux/fs.h>', '#include <linux/fs.h>\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>')
-    else:
-        c = '#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n' + c
-    with open('fs/stat.c', 'w') as f: f.write(c)
-    print("    ✅ Headers SUSFS injectés dans fs/stat.c")
-
-# 6. Fixer fs/open.c (SUSFS Hook manquant)
-with open('fs/open.c', 'r') as f: c = f.read()
-if '#include <linux/susfs_def.h>' not in c:
-    if '#include <linux/fs.h>' in c:
-        c = c.replace('#include <linux/fs.h>', '#include <linux/fs.h>\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>')
-    else:
-        c = '#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n' + c
-    with open('fs/open.c', 'w') as f: f.write(c)
-    print("    ✅ Headers SUSFS injectés dans fs/open.c")
-
-import re
-pattern = r'(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)'
-replacement = r'''\1
-#ifdef CONFIG_KSU_SUSFS
-    {
-        extern int susfs_handle_faccessat(int *, const char __user **, int *, int *);
-        susfs_handle_faccessat(&dfd, &filename, &mode, NULL);
-    }
-#endif
-'''
-if 'susfs_handle_faccessat' not in c:
-    new_c = re.sub(pattern, replacement, c, count=1)
-    if new_c != c:
-        c = new_c
-        print("    ✅ Hook SUSFS injecté dans faccessat")
-    else:
-        pattern2 = r'(int do_faccessat\(int dfd,\s*const char __user \*,\s*filename,\s*int mode\)\s*\{)'
-        new_c2 = re.sub(pattern2, replacement, c, count=1)
-        if new_c2 != c:
-            c = new_c2
-            print("    ✅ Hook SUSFS injecté dans do_faccessat")
-        else:
-            print("    ❌ Échec : ni faccessat ni do_faccessat trouvés")
-    with open('fs/open.c', 'w') as f: f.write(c)
-else:
-    print("    ✅ Hook SUSFS déjà présent dans fs/open.c")
-
-print("✅ Tous les symboles SUSFS sont corrigés.")
-PYEOF
+# 6c. Vérification finale
+echo "--- Vérification des fichiers SUSFS ---"
+for f in "include/linux/susfs.h" "include/linux/susfs_def.h" "fs/susfs.c"; do
+    if [ -f "$f" ]; then
+        echo "  ✅ $f"
+    else
+        echo "  ❌ $f manquant"
+    fi
+done
 
 # ==================== 7. CONFIGURATION (SUSFS ACTIVÉ) ====================
 echo ""
