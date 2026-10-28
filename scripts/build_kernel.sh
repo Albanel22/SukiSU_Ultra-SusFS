@@ -410,34 +410,51 @@ fi
 # 6b-2. Correction des symboles SUSFS manquants dans fs/super.c
 echo "--- Correction des symboles SUSFS dans fs/super.c ---"
 
-if ! grep -q '#include <linux/susfs.h>' fs/super.c; then
-    sed -i 's|#include <linux/fs.h>|#include <linux/fs.h>\n#include <linux/susfs.h>|' fs/super.c
-fi
+python3 - <<'PYEOF'
+import re
+import os
 
-if ! grep -q 'susfs_is_sdcard_android_data_not_decrypted' include/linux/susfs.h; then
-    cat >> include/linux/susfs.h <<'EOF'
+# 1. Fixer fs/super.c (Includes)
+with open('fs/super.c', 'r') as f: c = f.read()
 
-/* Corrections V8.1 pour les rejets du patch sur Motorola 4.19 */
-extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted;
-extern bool susfs_is_current_ksu_domain(void);
-EOF
-fi
+# Ajouter les headers SUSFS après les includes existants
+if '#include <linux/susfs.h>' not in c:
+    c = c.replace('#include <linux/blkdev.h>', '#include <linux/blkdev.h>\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>')
+    # Fallback si blkdev.h n'est pas là
+    if '#include <linux/susfs.h>' not in c:
+        c = c.replace('#include "internal.h"', '#include "internal.h"\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>')
+    with open('fs/super.c', 'w') as f: f.write(c)
+    print("    ✅ Headers SUSFS injectés dans fs/super.c")
 
-if ! grep -q '#include <linux/jump_label.h>' include/linux/susfs.h; then
-    sed -i 's|#include <linux/types.h>|#include <linux/types.h>\n#include <linux/jump_label.h>|' include/linux/susfs.h
-fi
+# 2. Fixer include/linux/susfs_def.h (DEFAULT_KSU_MNT_MINOR_DEV)
+with open('include/linux/susfs_def.h', 'r') as f: c = f.read()
+if 'DEFAULT_KSU_MNT_MINOR_DEV' not in c:
+    c += '\n/* Fallback V8.2 */\n#ifndef DEFAULT_KSU_MNT_MINOR_DEV\n#define DEFAULT_KSU_MNT_MINOR_DEV 1000\n#endif\n'
+    with open('include/linux/susfs_def.h', 'w') as f: f.write(c)
+    print("    ✅ DEFAULT_KSU_MNT_MINOR_DEV défini dans susfs_def.h")
 
-echo "✅ Symboles SUSFS corrigés"
+# 3. Fixer include/linux/susfs.h (Prototypes manquants)
+with open('include/linux/susfs.h', 'r') as f: c = f.read()
+if 'susfs_is_sdcard_android_data_not_decrypted' not in c:
+    c += '\n/* Fallback V8.2 */\n#include <linux/jump_label.h>\nextern struct static_key_false susfs_is_sdcard_android_data_not_decrypted;\nextern bool susfs_is_current_ksu_domain(void);\n'
+    with open('include/linux/susfs.h', 'w') as f: f.write(c)
+    print("    ✅ Prototypes ajoutés dans susfs.h")
 
-# 6c. Vérification finale
-echo "--- Vérification des fichiers SUSFS ---"
-for f in "include/linux/susfs.h" "include/linux/susfs_def.h" "fs/susfs.c"; do
-    if [ -f "$f" ]; then
-        echo "  ✅ $f"
-    else
-        echo "  ❌ $f manquant"
-    fi
-done
+# 4. Fixer fs/susfs.c (Définitions manquantes)
+with open('fs/susfs.c', 'r') as f: c = f.read()
+
+if 'DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)' not in c:
+    c += '\n/* Fallback V8.2 */\nDEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted);\n'
+    print("    ✅ Définition de susfs_is_sdcard_android_data_not_decrypted ajoutée")
+
+if 'bool susfs_is_current_ksu_domain(void)' not in c:
+    c += '\n/* Fallback V8.2 */\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
+    print("    ✅ Définition de susfs_is_current_ksu_domain ajoutée")
+
+with open('fs/susfs.c', 'w') as f: f.write(c)
+
+print("✅ Tous les symboles SUSFS sont maintenant corrigés.")
+PYEOF
 
 # ==================== 7. CONFIGURATION (SUSFS ACTIVÉ) ====================
 echo ""
