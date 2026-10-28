@@ -371,38 +371,75 @@ if 'ksu_handle_stat' not in c:
 PYEOF
 fi
 
-# ==================== 6. SUSFS : PATCH JACKA1LTMAN (V8.0) ====================
+# ==================== 6. SUSFS : PATCH JACKA1LTMAN + FIX REJETS ====================
 echo ""
 echo "=== Intégration SUSFS (JackA1ltman) ==="
 
-# 6a. Télécharger le patch SUSFS pour 4.19
+# 6a. Télécharger le patch
 curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
 if [ -f /tmp/susfs_patch_to_4.19.patch ]; then
     echo "Application du patch SUSFS..."
-    # --forward permet de continuer même si certains hunks sont déjà appliqués
     patch -p1 --forward < /tmp/susfs_patch_to_4.19.patch || true
-    echo "✅ Patch SUSFS appliqué (vérifie les .rej si le build échoue)"
 else
     echo "⚠️ Impossible de télécharger le patch SUSFS"
 fi
 
-# 6b. Vérifier la présence des fichiers SUSFS
+# 6b. Résolution des rejets manuels (Motorola spécifique)
+echo "--- Résolution des rejets spécifiques Motorola ---"
+
+# Fix fs/namespace.c (Hunk #1 et #6)
+if [ -f "fs/namespace.c.rej" ]; then
+    echo "  Correction de fs/namespace.c..."
+    python3 - <<'PYEOF'
+import re
+# On ajoute les includes manquants
+with open('fs/namespace.c', 'r') as f: c = f.read()
+if 'susfs_def.h' not in c:
+    c = c.replace('#include <linux/mount.h>', '#include <linux/mount.h>\n#include <linux/susfs_def.h>')
+# On ajoute l'appel à susfs pour le mount
+if 'susfs_handle_mount' not in c:
+    c = c.replace('int path_mount(const char *dev_name, struct path *path,', '#ifdef CONFIG_KSU_SUSFS\n    susfs_handle_mount(path);\n#endif\nint path_mount(const char *dev_name, struct path *path,')
+with open('fs/namespace.c', 'w') as f: f.write(c)
+print("    ✅ fs/namespace.c corrigé")
+PYEOF
+    rm -f fs/namespace.c.rej
+fi
+
+# Fix fs/proc/task_mmu.c (Hunk #7)
+if [ -f "fs/proc/task_mmu.c.rej" ]; then
+    echo "  Correction de fs/proc/task_mmu.c..."
+    python3 - <<'PYEOF'
+with open('fs/proc/task_mmu.c', 'r') as f: c = f.read()
+if 'susfs_def.h' not in c:
+    c = c.replace('#include <linux/seq_file.h>', '#include <linux/seq_file.h>\n#include <linux/susfs_def.h>')
+with open('fs/proc/task_mmu.c', 'w') as f: f.write(c)
+print("    ✅ fs/proc/task_mmu.c corrigé")
+PYEOF
+    rm -f fs/proc/task_mmu.c.rej
+fi
+
+# Fix fs/super.c (Hunk #1)
+if [ -f "fs/super.c.rej" ]; then
+    echo "  Correction de fs/super.c..."
+    python3 - <<'PYEOF'
+with open('fs/super.c', 'r') as f: c = f.read()
+if 'susfs_def.h' not in c:
+    c = c.replace('#include <linux/fs.h>', '#include <linux/fs.h>\n#include <linux/susfs_def.h>')
+with open('fs/super.c', 'w') as f: f.write(c)
+print("    ✅ fs/super.c corrigé")
+PYEOF
+    rm -f fs/super.c.rej
+fi
+
+# 6c. Vérification finale
 echo "--- Vérification des fichiers SUSFS ---"
 for f in "include/linux/susfs.h" "include/linux/susfs_def.h" "fs/susfs.c"; do
     if [ -f "$f" ]; then
         echo "  ✅ $f"
     else
-        echo "  ⚠️  $f manquant"
+        echo "  ❌ $f manquant"
     fi
 done
-
-# 6c. Si le patch n'a pas créé les headers, les télécharger manuellement
-if [ ! -f "include/linux/susfs.h" ] || [ ! -f "include/linux/susfs_def.h" ]; then
-    echo "Téléchargement manuel des headers SUSFS..."
-    mkdir -p include/linux
-    curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Headers/susfs.h" -o include/linux/susfs.h 2>/dev/null || true
-    curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Headers/susfs_def.h" -o include/linux/susfs_def.h 2>/dev/null || true
-fi
 
 # ==================== 7. CONFIGURATION (SUSFS ACTIVÉ) ====================
 echo ""
