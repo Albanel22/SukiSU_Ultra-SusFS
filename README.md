@@ -55,3 +55,39 @@ Le code de SukiSU-Ultra appelle des fonctions SUSFS (`ksu_selinux_hide_*`) qui n
 ```bash
 chmod +x build_sukisu_4.19.sh
 ./build_sukisu_4.19.sh
+
+
+Le script générera un dossier output/ contenant :
+
+SukiSU-Ultra-builtin-v7.24-boot.img : Le boot image prêt à être flashé.
+
+Image-v7.24 : Le noyau brut (si vous préférez repacker vous-même).
+
+ksud-v7.24 : Le binaire userspace.
+
+Installation
+Flashez le fichier boot.img sur votre appareil :
+
+bash
+fastboot flash boot SukiSU-Ultra-builtin-v7.24-boot.img
+Installez l'APK SukiSU-Ultra (version v4.1.x ou v4.2.x).
+
+Ouvrez le Manager. Il devrait afficher "Fonctionnel" avec le "Manual Hook".
+
+Redémarrez l'appareil (nécessaire pour Zygisk Next).
+
+⚠️ Avertissements
+Ce projet est une expérimentation menée sur un appareil de test secondaire. Flasher un noyau personnalisé comporte toujours des risques (bootloop, perte de données). Sauvegardez votre boot.img d'origine !
+
+Bien que le noyau fonctionne, l'injection SELinux peut être partielle. Certaines applications très strictes (banques, etc.) peuvent encore détecter le root sans l'utilisation de modules de masquage.
+
+🙏 Remerciements
+L'équipe SukiSU-Ultra pour le développement du module.
+
+La communauté KernelSU pour les discussions sur les hooks manuels.
+
+JackA1ltman et backslashxx pour leurs travaux sur les backports et les hook patches.
+
+Nafis pour ses conseils avisés.
+
+Projet réalisé avec beaucoup de café, de patience et un soupçon de détermination. ☕💪
