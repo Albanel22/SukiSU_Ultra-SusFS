@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V8.9 : SukiSU-Ultra + SUSFS (JackA1ltman) - Fix forward declaration kstat
+# V8.10 : SukiSU-Ultra + SUSFS (JackA1ltman) - Fix signature kstat
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS — V8.9 ==="
+echo "=== Build SukiSU-Ultra + SUSFS — V8.10 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -223,7 +223,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V8.9 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V8.10 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -406,7 +406,7 @@ if 'susfs_parse_priority_app_strings' not in sh:
 if 'susfs_set_priority_uid_filter' not in sh:
     sh += '\nextern void susfs_set_priority_uid_filter(u64 arg);\n'
 if 'susfs_sus_kstat_spoof_generic_fillattr' not in sh:
-    sh += '\nstruct kstat;\nextern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat, int flags);\n'
+    sh += '\nstruct kstat;\nextern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat, u32 result_mask);\n'
 
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
 
@@ -490,8 +490,8 @@ fi
 
 # ==================== 10. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.9-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.9-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.10-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.10-susfs"
 
 # ==================== 11. COMPILATION KSUD ====================
 echo ""
@@ -533,7 +533,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.9"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.10"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -580,11 +580,11 @@ if [ "${KSUD_OK:-0}" = "1" ] && [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.9-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.10-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
 # ==================== 13. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v8.9 (SUSFS) ==="
+echo "=== BUILD TERMINÉ v8.10 (SUSFS) ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
