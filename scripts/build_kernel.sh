@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V8.10 : SukiSU-Ultra + SUSFS (JackA1ltman) - Fix signature kstat
+# V8.11 : SukiSU-Ultra + SUSFS (JackA1ltman) - Fix macros individuelles
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS — V8.10 ==="
+echo "=== Build SukiSU-Ultra + SUSFS — V8.11 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -223,7 +223,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V8.10 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V8.11 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -390,8 +390,16 @@ if 'susfs_is_current_app_uid' not in sd:
 if 'STATX_SUS_KSTAT' not in sd:
     sd += '\n#ifndef STATX_SUS_KSTAT\n#define STATX_SUS_KSTAT 0x00010000U\n#endif\n#ifndef STATX_SUS_KSTAT_FUSE\n#define STATX_SUS_KSTAT_FUSE 0x00020000U\n#endif\n'
 
-if 'DEFAULT_KSU_MNT_ID' not in sd:
-    sd += '\n#ifndef DEFAULT_KSU_MNT_ID\n#define DEFAULT_KSU_MNT_ID 0x77777\n#endif\n#ifndef DEFAULT_KSU_MNT_GROUP_ID\n#define DEFAULT_KSU_MNT_GROUP_ID 0x77778\n#endif\n#ifndef VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT\n#define VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT 0x08000000\n#endif\n#ifndef CL_COPY_MNT_NS\n#define CL_COPY_MNT_NS 0x00000004\n#endif\n'
+# C'EST ICI QU'ON CORRIGE LE BUG DES MACROS
+macros = {
+    'DEFAULT_KSU_MNT_ID': '0x77777',
+    'DEFAULT_KSU_MNT_GROUP_ID': '0x77778',
+    'VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT': '0x08000000',
+    'CL_COPY_MNT_NS': '0x00000004'
+}
+for macro, val in macros.items():
+    if macro not in sd:
+        sd += f'\n#ifndef {macro}\n#define {macro} {val}\n#endif\n'
 
 with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
 
@@ -490,8 +498,8 @@ fi
 
 # ==================== 10. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.10-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.10-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.11-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.11-susfs"
 
 # ==================== 11. COMPILATION KSUD ====================
 echo ""
@@ -533,7 +541,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.10"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.11"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -580,11 +588,11 @@ if [ "${KSUD_OK:-0}" = "1" ] && [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.10-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.11-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
 # ==================== 13. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v8.10 (SUSFS) ==="
+echo "=== BUILD TERMINÉ v8.11 (SUSFS) ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
