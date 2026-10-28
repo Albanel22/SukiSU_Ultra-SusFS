@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V8.4 : SukiSU-Ultra builtin + SUSFS (Patch cyberc3dr) + Manual Hooks
-#        L'approche finale la plus stable pour SUSFS 2.x sur 4.19
+# V8.1 : SukiSU-Ultra builtin + SUSFS (JackA1ltman) + Manual Hooks
+#        Corrections des rejets Motorola + symboles SUSFS manquants
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS — V8.4 ==="
+echo "=== Build SukiSU-Ultra + SUSFS — V8.1 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -35,7 +35,7 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 [ ! -d "drivers/kernelsu" ] && echo "❌" && exit 1
 echo "✅ intégré"
 
-# ==================== 3. FIXES COMPATIBILITÉ 4.19 ====================
+# ==================== 3. FIXES COMPATIBILITÉ 4.19 (V7.24) ====================
 echo ""
 echo "=== Fixes compatibilité 4.19 ==="
 
@@ -237,7 +237,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V8.4 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V8.1 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -353,73 +353,93 @@ if 'ksu_handle_stat' not in c:
 PYEOF
 fi
 
-# ==================== 6. SUSFS : PATCH CYBERC3DR + CORRECTION DES INCLUDES ====================
+# ==================== 6. SUSFS : PATCH JACKA1LTMAN + FIX REJETS ====================
 echo ""
-echo "=== Intégration SUSFS (Patch cyberc3dr) ==="
+echo "=== Intégration SUSFS (JackA1ltman) ==="
 
-# 6a. Télécharger et appliquer le patch SUSFS mis à jour
-curl -LSs "https://raw.githubusercontent.com/cyberc3dr/nGKI_Kernel_Build/rebase/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
+curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_to_4.19.patch
 if [ -f /tmp/susfs_patch_to_4.19.patch ]; then
-    echo "Application du patch SUSFS (cyberc3dr)..."
+    echo "Application du patch SUSFS..."
     patch -p1 --forward < /tmp/susfs_patch_to_4.19.patch || true
 else
     echo "⚠️ Impossible de télécharger le patch SUSFS"
 fi
 
-# 6b. CORRECTION CHIRURGICALE : Ajout des includes manquants
-echo "--- Ajout des includes manquants (fs/super.c, etc.) ---"
-python3 - <<'PYEOF'
-import os, re
+# 6b. Résolution des rejets manuels (Motorola spécifique)
+echo "--- Résolution des rejets spécifiques Motorola ---"
 
-def ensure_include(file_path, include_str, anchor=None):
-    if not os.path.exists(file_path):
-        print(f"  ⚠️ {file_path} introuvable")
-        return
-    with open(file_path, 'r') as f:
-        content = f.read()
-    if 'susfs_def.h' in content:
-        print(f"  ✅ {file_path} : include déjà présent")
-        return
-        
-    if anchor and anchor in content:
-        content = content.replace(anchor, anchor + '\n' + include_str, 1)
-    else:
-        match = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', content)
-        if match:
-            content = content[:match.end()] + include_str + '\n' + content[match.end():]
-        else:
-            content = include_str + '\n' + content
-            
-    with open(file_path, 'w') as f:
-        f.write(content)
-    print(f"  ✅ {file_path} : include ajouté manuellement")
-
-# Correction pour fs/super.c (Essentiel pour les symboles SUSFS 2.x)
-ensure_include(
-    'fs/super.c', 
-    '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif // #ifdef CONFIG_KSU_SUSFS', 
-    anchor='#include <linux/user_namespace.h>'
-)
-
-# Correction pour fs/namespace.c
-ensure_include(
-    'fs/namespace.c', 
-    '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif // #ifdef CONFIG_KSU_SUSFS', 
-    anchor='#include <linux/mount.h>'
-)
-
-# Correction pour fs/proc/task_mmu.c
-ensure_include(
-    'fs/proc/task_mmu.c', 
-    '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif // #ifdef CONFIG_KSU_SUSFS', 
-    anchor='#include <linux/seq_file.h>'
-)
+if [ -f "fs/namespace.c.rej" ]; then
+    echo "  Correction de fs/namespace.c..."
+    python3 - <<'PYEOF'
+import re
+with open('fs/namespace.c', 'r') as f: c = f.read()
+if 'susfs_def.h' not in c:
+    c = c.replace('#include <linux/mount.h>', '#include <linux/mount.h>\n#include <linux/susfs_def.h>')
+if 'susfs_handle_mount' not in c:
+    c = c.replace('int path_mount(const char *dev_name, struct path *path,', '#ifdef CONFIG_KSU_SUSFS\n    susfs_handle_mount(path);\n#endif\nint path_mount(const char *dev_name, struct path *path,')
+with open('fs/namespace.c', 'w') as f: f.write(c)
+print("    ✅ fs/namespace.c corrigé")
 PYEOF
+    rm -f fs/namespace.c.rej
+fi
 
-# Nettoyage des fichiers .rej
-find . -name "*.rej" -delete
+if [ -f "fs/proc/task_mmu.c.rej" ]; then
+    echo "  Correction de fs/proc/task_mmu.c..."
+    python3 - <<'PYEOF'
+with open('fs/proc/task_mmu.c', 'r') as f: c = f.read()
+if 'susfs_def.h' not in c:
+    c = c.replace('#include <linux/seq_file.h>', '#include <linux/seq_file.h>\n#include <linux/susfs_def.h>')
+with open('fs/proc/task_mmu.c', 'w') as f: f.write(c)
+print("    ✅ fs/proc/task_mmu.c corrigé")
+PYEOF
+    rm -f fs/proc/task_mmu.c.rej
+fi
 
-# ==================== 7. CONFIGURATION ====================
+if [ -f "fs/super.c.rej" ]; then
+    echo "  Correction de fs/super.c..."
+    python3 - <<'PYEOF'
+with open('fs/super.c', 'r') as f: c = f.read()
+if 'susfs_def.h' not in c:
+    c = c.replace('#include <linux/fs.h>', '#include <linux/fs.h>\n#include <linux/susfs_def.h>')
+with open('fs/super.c', 'w') as f: f.write(c)
+print("    ✅ fs/super.c corrigé")
+PYEOF
+    rm -f fs/super.c.rej
+fi
+
+# 6b-2. Correction des symboles SUSFS manquants dans fs/super.c
+echo "--- Correction des symboles SUSFS dans fs/super.c ---"
+
+if ! grep -q '#include <linux/susfs.h>' fs/super.c; then
+    sed -i 's|#include <linux/fs.h>|#include <linux/fs.h>\n#include <linux/susfs.h>|' fs/super.c
+fi
+
+if ! grep -q 'susfs_is_sdcard_android_data_not_decrypted' include/linux/susfs.h; then
+    cat >> include/linux/susfs.h <<'EOF'
+
+/* Corrections V8.1 pour les rejets du patch sur Motorola 4.19 */
+extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted;
+extern bool susfs_is_current_ksu_domain(void);
+EOF
+fi
+
+if ! grep -q '#include <linux/jump_label.h>' include/linux/susfs.h; then
+    sed -i 's|#include <linux/types.h>|#include <linux/types.h>\n#include <linux/jump_label.h>|' include/linux/susfs.h
+fi
+
+echo "✅ Symboles SUSFS corrigés"
+
+# 6c. Vérification finale
+echo "--- Vérification des fichiers SUSFS ---"
+for f in "include/linux/susfs.h" "include/linux/susfs_def.h" "fs/susfs.c"; do
+    if [ -f "$f" ]; then
+        echo "  ✅ $f"
+    else
+        echo "  ❌ $f manquant"
+    fi
+done
+
+# ==================== 7. CONFIGURATION (SUSFS ACTIVÉ) ====================
 echo ""
 echo "=== Configuration SukiSU-Ultra + SUSFS ==="
 export ARCH=arm64; export SUBARCH=arm64
@@ -439,7 +459,6 @@ CONFIG_KSU_LSM_SECURITY_HOOKS=y
 CONFIG_KSU_FEATURE_SULOG=y
 CONFIG_KSU_FEATURE_ADBROOT=y
 
-# === SUSFS ===
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_SUS_PATH=y
 CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -451,7 +470,6 @@ CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
 CONFIG_KSU_SUSFS_SUS_MAP=y
 
-# === Dépendances ===
 CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
 CONFIG_KPROBES=y
@@ -487,13 +505,14 @@ if [ -f "out/arch/arm64/boot/Image" ]; then
 else
     echo "❌ BUILD FAILED"
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30
+    find . -name "*.rej" 2>/dev/null | head -10
     exit 1
 fi
 
 # ==================== 10. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.4-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.4-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.1-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.1-susfs"
 echo "✅ Noyau sauvegardé dans output/"
 
 # ==================== 11. COMPILATION KSUD ====================
@@ -538,7 +557,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.4"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.1"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -559,7 +578,7 @@ gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable."
-    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v8.4-susfs"
+    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v8.1-susfs"
     exit 0
 fi
 
@@ -590,12 +609,12 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.4-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.1-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 set -e
 
 # ==================== 13. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v8.4 (SUSFS) ==="
+echo "=== BUILD TERMINÉ v8.1 (SUSFS) ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
