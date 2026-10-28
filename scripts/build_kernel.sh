@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V8.5 : SukiSU-Ultra + SUSFS (JackA1ltman) - Fix namespace.c & macros
+# V8.6 : SukiSU-Ultra + SUSFS (JackA1ltman) - Nettoyage des conflits
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS — V8.5 ==="
+echo "=== Build SukiSU-Ultra + SUSFS — V8.6 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -35,6 +35,7 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 echo "✅ intégré"
 
 # ==================== 3. FIXES COMPATIBILITÉ 4.19 (Base V7.24) ====================
+# (Identique au script précédent, on garde la base solide)
 echo ""
 echo "=== Fixes compatibilité 4.19 ==="
 
@@ -236,7 +237,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V8.5 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V8.6 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -352,7 +353,7 @@ if 'ksu_handle_stat' not in c:
 PYEOF
 fi
 
-# ==================== 6. SUSFS : PATCH JACKA1LTMAN ====================
+# ==================== 6. SUSFS : PATCH JACKA1LTMAN + FIX ====================
 echo ""
 echo "=== Intégration SUSFS (JackA1ltman) ==="
 
@@ -364,90 +365,70 @@ else
     echo "⚠️ Impossible de télécharger le patch SUSFS"
 fi
 
-# 6b. Résolution des rejets manuels et des macros manquantes
-echo "--- Résolution des rejets et conflits ---"
+# 6b. Résolution des rejets et conflits (Le grand nettoyage)
+echo "--- Nettoyage final des conflits SUSFS ---"
 
 python3 - <<'PYEOF'
 import os
 import re
 
-# 1. Fixer fs/namespace.c : Forcer les includes tout en haut
-with open('fs/namespace.c', 'r') as f: c = f.read()
-if '#include <linux/susfs_def.h>' not in c:
-    c = '#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n' + c
-    with open('fs/namespace.c', 'w') as f: f.write(c)
-    print("    ✅ Headers SUSFS forcés dans fs/namespace.c")
-
-# 2. Fixer include/linux/susfs_def.h : Ajouter TOUTES les macros manquantes
-with open('include/linux/susfs_def.h', 'r') as f: sd = f.read()
-
-macros_to_add = {
-    'DEFAULT_KSU_MNT_ID': '0x77777',
-    'DEFAULT_KSU_MNT_GROUP_ID': '0x77778',
-    'VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT': '0x08000000',
-    'CL_COPY_MNT_NS': '0x00000004',
-    'DEFAULT_KSU_MNT_MINOR_DEV': '1000',
-    'STATX_SUS_KSTAT': '0x00010000U',
-    'STATX_SUS_KSTAT_FUSE': '0x00020000U'
-}
-
-added = False
-for macro, value in macros_to_add.items():
-    if macro not in sd:
-        sd += f'\n#ifndef {macro}\n#define {macro} {value}\n#endif\n'
-        added = True
-
-if 'susfs_is_current_app_uid' not in sd:
-    sd += '\nstatic inline bool susfs_is_current_app_uid(void) { return current_uid().val % 100000 > 10000; }\n'
-    added = True
-
-# Corriger le conflit de valeur pour le Manager
-if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER 0x55550' in sd:
-    sd = sd.replace('CMD_SUSFS_SET_PRIORITY_UID_FILTER 0x55550', 'CMD_SUSFS_SET_PRIORITY_UID_FILTER 0x55551')
-    added = True
-
-if added:
-    print("    ✅ Macros manquantes ajoutées dans susfs_def.h")
-
-with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
-
-# 3. Fixer include/linux/susfs.h : Prototypes
-with open('include/linux/susfs.h', 'r') as f: sh = f.read()
-protos = [
-    'susfs_is_sdcard_android_data_not_decrypted',
-    'susfs_is_current_ksu_domain',
-    'susfs_is_current_proc_umounted_for_zygote_next'
-]
-for proto in protos:
-    if proto not in sh:
-        sh += f'\nextern struct static_key_false {proto};\n' if 'sdcard' in proto else f'\nextern bool {proto}(void);\n'
-        print(f"    ✅ Prototype {proto} ajouté")
-if '#include <linux/jump_label.h>' not in sh:
-    sh = '#include <linux/jump_label.h>\n' + sh
-with open('include/linux/susfs.h', 'w') as f: f.write(sh)
-
-# 4. Fixer fs/susfs.c : Définitions manquantes
-with open('fs/susfs.c', 'r') as f: sc = f.read()
-if 'DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)' not in sc:
-    sc += '\nDEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted);\n'
-    print("    ✅ Definition static_key ajoutée")
-if 'bool susfs_is_current_ksu_domain(void)' not in sc:
-    sc += '\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
-    print("    ✅ Definition is_current_ksu_domain ajoutée")
-if 'bool susfs_is_current_proc_umounted_for_zygote_next(void)' not in sc:
-    sc += '\nbool susfs_is_current_proc_umounted_for_zygote_next(void) { return false; }\n'
-    print("    ✅ Definition umounted_for_zygote_next ajoutée")
-with open('fs/susfs.c', 'w') as f: f.write(sc)
-
-# 5. Fixer fs/stat.c et fs/open.c (déjà fait en V8.4, mais on assure)
-for fn in ['fs/stat.c', 'fs/open.c', 'fs/super.c']:
+# 1. Forcer les includes dans fs/namespace.c, fs/stat.c, fs/open.c, fs/super.c
+for fn in ['fs/namespace.c', 'fs/stat.c', 'fs/open.c', 'fs/super.c']:
     with open(fn, 'r') as f: c = f.read()
     if '#include <linux/susfs_def.h>' not in c:
         c = '#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n' + c
         with open(fn, 'w') as f: f.write(c)
         print(f"    ✅ Headers SUSFS forcés dans {fn}")
 
-# 6. Fixer les appels implicites dans pkg_observer.c et dispatch.c
+# 2. Nettoyer susfs_def.h (Retirer nos fausses définitions, garder le conflit résolu)
+with open('include/linux/susfs_def.h', 'r') as f: sd = f.read()
+
+# Corriger le conflit de valeur
+if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER 0x55550' in sd:
+    sd = sd.replace('CMD_SUSFS_SET_PRIORITY_UID_FILTER 0x55550', 'CMD_SUSFS_SET_PRIORITY_UID_FILTER 0x55551')
+    print("    ✅ Conflit de macro réglé (0x55551)")
+
+# On s'assure que les macros de base sont là
+macros = ['DEFAULT_KSU_MNT_ID', 'DEFAULT_KSU_MNT_GROUP_ID', 'VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT', 'CL_COPY_MNT_NS', 'DEFAULT_KSU_MNT_MINOR_DEV', 'STATX_SUS_KSTAT', 'STATX_SUS_KSTAT_FUSE']
+for m in macros:
+    if m not in sd:
+        sd += f'\n#ifndef {m}\n#define {m} 0\n#endif\n'
+
+# On RETIRE notre fallback pour susfs_is_current_proc_umounted_for_zygote_next
+# Car le patch l'a déjà défini dans fs/susfs.c (c'est ce qui causait l'erreur de redefinition)
+sd = re.sub(r'static inline bool susfs_is_current_proc_umounted_for_zygote_next\(void\).*?\n\}', '', sd, flags=re.DOTALL)
+print("    ✅ Fallback susfs_is_current_proc_umounted_for_zygote_next retiré")
+
+with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
+
+# 3. Nettoyer susfs.h
+with open('include/linux/susfs.h', 'r') as f: sh = f.read()
+
+# Changer static_key_false en static_key_true (car le patch l'a défini en TRUE)
+sh = sh.replace('extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted;', 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;')
+print("    ✅ Type de static_key corrigé (TRUE)")
+
+# Ajouter les fonctions manquantes du Manager
+if 'susfs_parse_priority_app_strings' not in sh:
+    sh += '\nextern void susfs_parse_priority_app_strings(void);\n'
+if 'susfs_set_priority_uid_filter' not in sh:
+    sh += '\nextern void susfs_set_priority_uid_filter(u64 arg);\n'
+print("    ✅ Déclarations du Manager ajoutées dans susfs.h")
+
+with open('include/linux/susfs.h', 'w') as f: f.write(sh)
+
+# 4. Nettoyer fs/susfs.c (Retirer nos définitions qui entrent en conflit avec le patch)
+with open('fs/susfs.c', 'r') as f: sc = f.read()
+
+# Le patch définit static_key_true, on ne doit pas forcer static_key_false
+sc = re.sub(r'DEFINE_STATIC_KEY_FALSE\(susfs_is_sdcard_android_data_not_decrypted\);', '', sc)
+# Le patch définit déjà la fonction
+sc = re.sub(r'bool susfs_is_current_proc_umounted_for_zygote_next\(void\).*?\n\}', '', sc, flags=re.DOTALL)
+print("    ✅ Doublons retirés de fs/susfs.c")
+
+with open('fs/susfs.c', 'w') as f: f.write(sc)
+
+# 5. Forcer les includes dans les fichiers KSU qui les utilisent
 for fn in ['drivers/kernelsu/manager/pkg_observer.c', 'drivers/kernelsu/supercall/dispatch.c']:
     with open(fn, 'r') as f: c = f.read()
     if '#include <linux/susfs.h>' not in c:
@@ -455,7 +436,7 @@ for fn in ['drivers/kernelsu/manager/pkg_observer.c', 'drivers/kernelsu/supercal
         with open(fn, 'w') as f: f.write(c)
         print(f"    ✅ susfs.h injecté dans {fn}")
 
-print("✅ Tous les conflits et macros manquantes sont résolus.")
+print("✅ Tous les conflits sont résolus.")
 PYEOF
 
 # ==================== 7. CONFIGURATION ====================
@@ -526,8 +507,8 @@ fi
 
 # ==================== 10. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.5-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.5-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.6-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.6-susfs"
 
 # ==================== 11. COMPILATION KSUD ====================
 echo ""
@@ -569,7 +550,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.5"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.6"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -616,11 +597,11 @@ if [ "${KSUD_OK:-0}" = "1" ] && [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.5-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.6-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
 # ==================== 13. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v8.5 (SUSFS) ==="
+echo "=== BUILD TERMINÉ v8.6 (SUSFS) ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
