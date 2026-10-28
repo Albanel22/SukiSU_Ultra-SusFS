@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V8.11 : SukiSU-Ultra + SUSFS (JackA1ltman) - Fix macros individuelles
+# V8.12 : SukiSU-Ultra + SUSFS (JackA1ltman) - Fix linker (stubs manquants)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS — V8.11 ==="
+echo "=== Build SukiSU-Ultra + SUSFS — V8.12 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -223,7 +223,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V8.11 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V8.12 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -390,7 +390,6 @@ if 'susfs_is_current_app_uid' not in sd:
 if 'STATX_SUS_KSTAT' not in sd:
     sd += '\n#ifndef STATX_SUS_KSTAT\n#define STATX_SUS_KSTAT 0x00010000U\n#endif\n#ifndef STATX_SUS_KSTAT_FUSE\n#define STATX_SUS_KSTAT_FUSE 0x00020000U\n#endif\n'
 
-# C'EST ICI QU'ON CORRIGE LE BUG DES MACROS
 macros = {
     'DEFAULT_KSU_MNT_ID': '0x77777',
     'DEFAULT_KSU_MNT_GROUP_ID': '0x77778',
@@ -425,9 +424,16 @@ if 'DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)' not in 
     sc += '\nDEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted);\n'
 if 'bool susfs_is_current_ksu_domain(void)' not in sc:
     sc += '\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
+
+# C'EST ICI QU'ON AJOUTE LES STUBS POUR LE LINKER
+if 'void susfs_parse_priority_app_strings(void)' not in sc:
+    sc += '\nvoid susfs_parse_priority_app_strings(void) { }\n'
+if 'void susfs_set_priority_uid_filter(u64 arg)' not in sc:
+    sc += '\nvoid susfs_set_priority_uid_filter(u64 arg) { }\n'
+
 with open('fs/susfs.c', 'w') as f: f.write(sc)
 
-print("✅ Tous les includes et macros sont forcés.")
+print("✅ Tous les includes, macros et stubs (pour le linker) sont forcés.")
 PYEOF
 
 # ==================== 7. CONFIGURATION ====================
@@ -498,8 +504,8 @@ fi
 
 # ==================== 10. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.11-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.11-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.12-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.12-susfs"
 
 # ==================== 11. COMPILATION KSUD ====================
 echo ""
@@ -541,7 +547,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.11"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.12"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -588,11 +594,11 @@ if [ "${KSUD_OK:-0}" = "1" ] && [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.11-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.12-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
 # ==================== 13. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v8.11 (SUSFS) ==="
+echo "=== BUILD TERMINÉ v8.12 (SUSFS) ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
