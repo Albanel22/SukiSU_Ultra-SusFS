@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V8.1 : SukiSU-Ultra builtin + SUSFS (JackA1ltman) + Manual Hooks
-#        Corrections des rejets Motorola + symboles SUSFS manquants
+# V8.3 : SukiSU-Ultra + SUSFS (JackA1ltman) + Manual Hooks
+#        Corrections complètes des rejets de patch sur noyau Motorola 4.19
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS — V8.1 ==="
+echo "=== Build SukiSU-Ultra + SUSFS — V8.3 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -35,7 +35,7 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 [ ! -d "drivers/kernelsu" ] && echo "❌" && exit 1
 echo "✅ intégré"
 
-# ==================== 3. FIXES COMPATIBILITÉ 4.19 (V7.24) ====================
+# ==================== 3. FIXES COMPATIBILITÉ 4.19 (Base V7.24) ====================
 echo ""
 echo "=== Fixes compatibilité 4.19 ==="
 
@@ -237,7 +237,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V8.1 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V8.3 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -286,9 +286,9 @@ print("  ✅ sepolicy.c adapté")
 PYEOF
 fi
 
-# ==================== 5. INJECTION MANUAL HOOKS ====================
+# ==================== 5. INJECTION MANUAL HOOKS (KernelSU) ====================
 echo ""
-echo "=== Injection des manual hooks ==="
+echo "=== Injection des manual hooks (KernelSU) ==="
 
 EXEC_C="fs/exec.c"
 if grep -q 'do_execveat_common' "$EXEC_C"; then
@@ -353,7 +353,7 @@ if 'ksu_handle_stat' not in c:
 PYEOF
 fi
 
-# ==================== 6. SUSFS : PATCH JACKA1LTMAN + FIX REJETS ====================
+# ==================== 6. SUSFS : PATCH JACKA1LTMAN ====================
 echo ""
 echo "=== Intégration SUSFS (JackA1ltman) ==="
 
@@ -365,13 +365,13 @@ else
     echo "⚠️ Impossible de télécharger le patch SUSFS"
 fi
 
-# 6b. Résolution des rejets manuels (Motorola spécifique)
+# 6b. Résolution des rejets manuels
 echo "--- Résolution des rejets spécifiques Motorola ---"
 
+# 6b-1 : fs/namespace.c
 if [ -f "fs/namespace.c.rej" ]; then
     echo "  Correction de fs/namespace.c..."
     python3 - <<'PYEOF'
-import re
 with open('fs/namespace.c', 'r') as f: c = f.read()
 if 'susfs_def.h' not in c:
     c = c.replace('#include <linux/mount.h>', '#include <linux/mount.h>\n#include <linux/susfs_def.h>')
@@ -383,6 +383,7 @@ PYEOF
     rm -f fs/namespace.c.rej
 fi
 
+# 6b-2 : fs/proc/task_mmu.c
 if [ -f "fs/proc/task_mmu.c.rej" ]; then
     echo "  Correction de fs/proc/task_mmu.c..."
     python3 - <<'PYEOF'
@@ -395,6 +396,7 @@ PYEOF
     rm -f fs/proc/task_mmu.c.rej
 fi
 
+# 6b-3 : fs/super.c
 if [ -f "fs/super.c.rej" ]; then
     echo "  Correction de fs/super.c..."
     python3 - <<'PYEOF'
@@ -407,53 +409,113 @@ PYEOF
     rm -f fs/super.c.rej
 fi
 
-# 6b-2. Correction des symboles SUSFS manquants dans fs/super.c
-echo "--- Correction des symboles SUSFS dans fs/super.c ---"
-
+# 6b-4 : Correction des symboles manquants dans les headers et fichiers
+echo "--- Correction des symboles SUSFS manquants ---"
 python3 - <<'PYEOF'
-import re
 import os
 
 # 1. Fixer fs/super.c (Includes)
 with open('fs/super.c', 'r') as f: c = f.read()
-
-# Ajouter les headers SUSFS après les includes existants
 if '#include <linux/susfs.h>' not in c:
     c = c.replace('#include <linux/blkdev.h>', '#include <linux/blkdev.h>\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>')
-    # Fallback si blkdev.h n'est pas là
     if '#include <linux/susfs.h>' not in c:
         c = c.replace('#include "internal.h"', '#include "internal.h"\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>')
     with open('fs/super.c', 'w') as f: f.write(c)
     print("    ✅ Headers SUSFS injectés dans fs/super.c")
 
-# 2. Fixer include/linux/susfs_def.h (DEFAULT_KSU_MNT_MINOR_DEV)
+# 2. Fixer include/linux/susfs_def.h
 with open('include/linux/susfs_def.h', 'r') as f: c = f.read()
 if 'DEFAULT_KSU_MNT_MINOR_DEV' not in c:
-    c += '\n/* Fallback V8.2 */\n#ifndef DEFAULT_KSU_MNT_MINOR_DEV\n#define DEFAULT_KSU_MNT_MINOR_DEV 1000\n#endif\n'
-    with open('include/linux/susfs_def.h', 'w') as f: f.write(c)
+    c += '\n/* Fallback V8.3 */\n#ifndef DEFAULT_KSU_MNT_MINOR_DEV\n#define DEFAULT_KSU_MNT_MINOR_DEV 1000\n#endif\n'
     print("    ✅ DEFAULT_KSU_MNT_MINOR_DEV défini dans susfs_def.h")
+if 'STATX_SUS_KSTAT' not in c:
+    c += '''
+/* Fallback V8.3 : Constantes STATX manquantes */
+#ifndef STATX_SUS_KSTAT
+#define STATX_SUS_KSTAT 0x00010000U
+#endif
+#ifndef STATX_SUS_KSTAT_FUSE
+#define STATX_SUS_KSTAT_FUSE 0x00020000U
+#endif
+'''
+    print("    ✅ Constantes STATX_SUS_KSTAT ajoutées dans susfs_def.h")
+if 'susfs_is_current_app_uid' not in c:
+    c += '''
+/* Fallback V8.3 : Fonction manquante */
+static inline bool susfs_is_current_app_uid(void) {
+    return current_uid().val % 100000 > 10000;
+}
+'''
+    print("    ✅ Fonction susfs_is_current_app_uid ajoutée dans susfs_def.h")
+with open('include/linux/susfs_def.h', 'w') as f: f.write(c)
 
-# 3. Fixer include/linux/susfs.h (Prototypes manquants)
+# 3. Fixer include/linux/susfs.h
 with open('include/linux/susfs.h', 'r') as f: c = f.read()
 if 'susfs_is_sdcard_android_data_not_decrypted' not in c:
-    c += '\n/* Fallback V8.2 */\n#include <linux/jump_label.h>\nextern struct static_key_false susfs_is_sdcard_android_data_not_decrypted;\nextern bool susfs_is_current_ksu_domain(void);\n'
-    with open('include/linux/susfs.h', 'w') as f: f.write(c)
+    c += '\n/* Fallback V8.3 */\n#include <linux/jump_label.h>\nextern struct static_key_false susfs_is_sdcard_android_data_not_decrypted;\nextern bool susfs_is_current_ksu_domain(void);\n'
     print("    ✅ Prototypes ajoutés dans susfs.h")
+with open('include/linux/susfs.h', 'w') as f: f.write(c)
 
-# 4. Fixer fs/susfs.c (Définitions manquantes)
+# 4. Fixer fs/susfs.c
 with open('fs/susfs.c', 'r') as f: c = f.read()
-
 if 'DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)' not in c:
-    c += '\n/* Fallback V8.2 */\nDEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted);\n'
+    c += '\n/* Fallback V8.3 */\nDEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted);\n'
     print("    ✅ Définition de susfs_is_sdcard_android_data_not_decrypted ajoutée")
-
 if 'bool susfs_is_current_ksu_domain(void)' not in c:
-    c += '\n/* Fallback V8.2 */\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
+    c += '\n/* Fallback V8.3 */\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
     print("    ✅ Définition de susfs_is_current_ksu_domain ajoutée")
-
 with open('fs/susfs.c', 'w') as f: f.write(c)
 
-print("✅ Tous les symboles SUSFS sont maintenant corrigés.")
+# 5. Fixer fs/stat.c (Headers)
+with open('fs/stat.c', 'r') as f: c = f.read()
+if '#include <linux/susfs_def.h>' not in c:
+    if '#include <linux/stat.h>' in c:
+        c = c.replace('#include <linux/stat.h>', '#include <linux/stat.h>\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>')
+    elif '#include <linux/fs.h>' in c:
+        c = c.replace('#include <linux/fs.h>', '#include <linux/fs.h>\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>')
+    else:
+        c = '#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n' + c
+    with open('fs/stat.c', 'w') as f: f.write(c)
+    print("    ✅ Headers SUSFS injectés dans fs/stat.c")
+
+# 6. Fixer fs/open.c (SUSFS Hook manquant)
+with open('fs/open.c', 'r') as f: c = f.read()
+if '#include <linux/susfs_def.h>' not in c:
+    if '#include <linux/fs.h>' in c:
+        c = c.replace('#include <linux/fs.h>', '#include <linux/fs.h>\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>')
+    else:
+        c = '#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n' + c
+    with open('fs/open.c', 'w') as f: f.write(c)
+    print("    ✅ Headers SUSFS injectés dans fs/open.c")
+
+import re
+pattern = r'(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)'
+replacement = r'''\1
+#ifdef CONFIG_KSU_SUSFS
+    {
+        extern int susfs_handle_faccessat(int *, const char __user **, int *, int *);
+        susfs_handle_faccessat(&dfd, &filename, &mode, NULL);
+    }
+#endif
+'''
+if 'susfs_handle_faccessat' not in c:
+    new_c = re.sub(pattern, replacement, c, count=1)
+    if new_c != c:
+        c = new_c
+        print("    ✅ Hook SUSFS injecté dans faccessat")
+    else:
+        pattern2 = r'(int do_faccessat\(int dfd,\s*const char __user \*,\s*filename,\s*int mode\)\s*\{)'
+        new_c2 = re.sub(pattern2, replacement, c, count=1)
+        if new_c2 != c:
+            c = new_c2
+            print("    ✅ Hook SUSFS injecté dans do_faccessat")
+        else:
+            print("    ❌ Échec : ni faccessat ni do_faccessat trouvés")
+    with open('fs/open.c', 'w') as f: f.write(c)
+else:
+    print("    ✅ Hook SUSFS déjà présent dans fs/open.c")
+
+print("✅ Tous les symboles SUSFS sont corrigés.")
 PYEOF
 
 # ==================== 7. CONFIGURATION (SUSFS ACTIVÉ) ====================
@@ -528,8 +590,8 @@ fi
 
 # ==================== 10. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.1-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.1-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v8.3-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v8.3-susfs"
 echo "✅ Noyau sauvegardé dans output/"
 
 # ==================== 11. COMPILATION KSUD ====================
@@ -574,7 +636,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.1"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v8.3"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -595,7 +657,7 @@ gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable."
-    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v8.1-susfs"
+    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v8.3-susfs"
     exit 0
 fi
 
@@ -626,12 +688,12 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.1-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v8.3-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 set -e
 
 # ==================== 13. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v8.1 (SUSFS) ==="
+echo "=== BUILD TERMINÉ v8.3 (SUSFS) ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
