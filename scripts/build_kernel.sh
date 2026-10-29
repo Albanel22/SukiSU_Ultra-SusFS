@@ -38,25 +38,17 @@ echo "✅ SukiSU-Ultra (builtin) intégré"
 echo ""
 echo "=== Application du patch SUSFS v2.3.0 ==="
 
-# On crée le fichier de patch à partir du diff fourni
-# (Dans un cas réel, on le téléchargerait depuis une URL. Ici, on suppose qu'il est dans /tmp/susfs.patch)
-if [ ! -f "/tmp/susfs.patch" ]; then
-    echo "❌ /tmp/susfs.patch introuvable. Veuillez placer le diff SUSFS à cet emplacement."
+# On cherche le fichier de patch à la racine de l'espace de travail
+SUSFS_PATCH=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name "*.patch" -o -name "susfs*.diff" 2>/dev/null | head -1)
+
+if [ -z "$SUSFS_PATCH" ]; then
+    echo "❌ Aucun fichier de patch SUSFS trouvé à la racine de $GITHUB_WORKSPACE"
+    echo "   Veuillez déposer votre fichier .patch à la racine de votre branche."
     exit 1
 fi
 
-patch -p1 --forward < /tmp/susfs.patch || true
-
-# Vérification des fichiers SUSFS
-echo "--- Vérification des fichiers SUSFS ---"
-for f in "include/linux/susfs.h" "include/linux/susfs_def.h" "fs/susfs.c"; do
-    if [ -f "$f" ]; then
-        echo "  ✅ $f"
-    else
-        echo "  ❌ $f manquant"
-        exit 1
-    fi
-done
+echo "✅ Fichier de patch trouvé : $SUSFS_PATCH"
+patch -p1 --forward < "$SUSFS_PATCH" || true
 
 # ==================== 4. SCRIPT DE HOOKS (JackA1ltman) ====================
 echo ""
