@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V11.0 : SukiSU-Ultra (builtin) + SUSFS v2.3.0 (Patch fourni) + Inline Hooks
+# V11.1 : SukiSU-Ultra (builtin) + SUSFS v2.3.0 (Patch fourni) + Correctifs
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS v2.3.0 — V11.0 ==="
+echo "=== Build SukiSU-Ultra + SUSFS v2.3.0 — V11.1 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -49,6 +49,110 @@ fi
 
 echo "✅ Fichier de patch trouvé : $SUSFS_PATCH"
 patch -p1 --forward < "$SUSFS_PATCH" || true
+
+# ==================== 3b. CORRECTIFS POST-PATCH SUSFS ====================
+echo ""
+echo "=== Correctifs post-patch SUSFS ==="
+
+# --- Fix 1 : Ajouter fs/susfs.o dans fs/Makefile si absent ---
+if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
+    echo "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" >> fs/Makefile
+    echo "    ✅ fs/Makefile : ligne susfs.o ajoutée"
+else
+    echo "    ✅ fs/Makefile : ligne susfs.o déjà présente"
+fi
+
+# --- Fix 2 : Forcer les includes et déclarations dans fs/super.c ---
+python3 - <<'PYEOF'
+import os
+def force_super_c():
+    with open('fs/super.c', 'r') as f:
+        c = f.read()
+
+    # Includes
+    if '#include <linux/susfs_def.h>' not in c:
+        c = c.replace('#include <linux/user_namespace.h>', '#include <linux/user_namespace.h>\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n#include <linux/jump_label.h>\n#endif')
+        print("    ✅ fs/super.c : includes SUSFS ajoutés")
+
+    # Déclarations externes
+    if 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted' not in c:
+        c = c.replace('#include "internal.h"', '#include "internal.h"\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#endif')
+        print("    ✅ fs/super.c : déclarations externes ajoutées")
+
+    with open('fs/super.c', 'w') as f:
+        f.write(c)
+
+force_super_c()
+PYEOF
+
+# --- Fix 3 : Forcer les includes dans fs/stat.c, fs/open.c, fs/namespace.c ---
+python3 - <<'PYEOF'
+import os
+def force_include(filepath, includes):
+    if not os.path.exists(filepath):
+        return
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+    insert_idx = 0
+    in_comment = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith('/*'):
+            in_comment = True
+        if in_comment:
+            if '*/' in stripped:
+                in_comment = False
+            continue
+        if stripped.startswith('//') or stripped == '':
+            continue
+        insert_idx = i
+        break
+    new_lines = [inc + '\n' for inc in includes if inc not in lines]
+    if new_lines:
+        lines = lines[:insert_idx] + new_lines + lines[insert_idx:]
+        with open(filepath, 'w') as f:
+            f.writelines(lines)
+        print(f"    ✅ Includes forcés dans {filepath}")
+
+for f in ['fs/stat.c', 'fs/open.c', 'fs/namespace.c']:
+    force_include(f, ['#include <linux/susfs.h>', '#include <linux/susfs_def.h>'])
+PYEOF
+
+# --- Fix 4 : Ajouter les macros manquantes dans susfs_def.h ---
+python3 - <<'PYEOF'
+with open('include/linux/susfs_def.h', 'r') as f:
+    sd = f.read()
+
+if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER' not in sd:
+    sd += '\n#ifndef CMD_SUSFS_SET_PRIORITY_UID_FILTER\n#define CMD_SUSFS_SET_PRIORITY_UID_FILTER 0x55551\n#endif\n'
+    print("    ✅ CMD_SUSFS_SET_PRIORITY_UID_FILTER ajouté")
+
+if 'DEFAULT_KSU_MNT_MINOR_DEV' not in sd:
+    sd += '\n#ifndef DEFAULT_KSU_MNT_MINOR_DEV\n#define DEFAULT_KSU_MNT_MINOR_DEV (1 << 12)\n#endif\n'
+    print("    ✅ DEFAULT_KSU_MNT_MINOR_DEV ajouté")
+
+with open('include/linux/susfs_def.h', 'w') as f:
+    f.write(sd)
+PYEOF
+
+# --- Fix 5 : Ajouter les stubs manquants dans fs/susfs.c ---
+python3 - <<'PYEOF'
+with open('fs/susfs.c', 'r') as f:
+    sc = f.read()
+
+if 'void susfs_parse_priority_app_strings(void)' not in sc:
+    sc += '\nvoid susfs_parse_priority_app_strings(void) { }\n'
+    print("    ✅ susfs_parse_priority_app_strings ajouté (stub)")
+
+if 'void susfs_set_priority_uid_filter(u64 arg)' not in sc:
+    sc += '\nvoid susfs_set_priority_uid_filter(u64 arg) { }\n'
+    print("    ✅ susfs_set_priority_uid_filter ajouté (stub)")
+
+with open('fs/susfs.c', 'w') as f:
+    f.write(sc)
+PYEOF
+
+echo "✅ Correctifs post-patch appliqués"
 
 # ==================== 4. SCRIPT DE HOOKS (JackA1ltman) ====================
 echo ""
@@ -308,13 +412,15 @@ if [ -f "out/arch/arm64/boot/Image" ]; then
 else
     echo "❌ BUILD FAILED"
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30
+    echo "--- Fichiers .rej éventuels ---"
+    find . -name "*.rej" 2>/dev/null | head -10
     exit 1
 fi
 
 # ==================== 9. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v11.0-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v11.0-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v11.1-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v11.1-susfs"
 
 # ==================== 10. COMPILATION KSUD ====================
 echo ""
@@ -356,7 +462,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v11.0"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v11.1"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -403,11 +509,11 @@ if [ "${KSUD_OK:-0}" = "1" ] && [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v11.0-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v11.1-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
 # ==================== 12. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v11.0 (SUSFS v2.3.0) ==="
+echo "=== BUILD TERMINÉ v11.1 (SUSFS v2.3.0) ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
