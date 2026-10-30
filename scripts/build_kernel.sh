@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.25 : SukiSU-Ultra builtin — V7.24 (Manager Fonctionnel) + SUSFS v2.3.0
+# V7.25 : SukiSU-Ultra builtin — V7.24 (Manager OK) + SUSFS v2.3.0 (Patch tout-en-un)
 # =============================================================================
 
 echo "=== Build SukiSU-Ultra builtin — V7.25 (SUSFS) ==="
@@ -34,29 +34,10 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 [ ! -d "drivers/kernelsu" ] && echo "❌" && exit 1
 echo "✅ intégré"
 
-# ==================== 2b. TÉLÉCHARGEMENT FICHIERS SUSFS ====================
+# ==================== 2b. APPLICATION DU PATCH SUSFS (TOUT-EN-UN) ====================
 echo ""
-echo "=== Téléchargement des 3 fichiers SUSFS manquants ==="
-BASE_GITLAB="https://gitlab.com/simonpunk/susfs4ksu/-/raw/master/kernel_patches"
-BASE_GITHUB="https://raw.githubusercontent.com/wspyams/susfs4ksu/master/kernel_patches"
+echo "=== Application du patch SUSFS (VFS + Fichiers) ==="
 
-download_susfs() {
-    local dest="$1"
-    local path="$2"
-    echo "  → Téléchargement de $dest..."
-    if curl -LSsf "$BASE_GITLAB/$path" -o "$dest" 2>/dev/null; then return 0; fi
-    if curl -LSsf "$BASE_GITHUB/$path" -o "$dest" 2>/dev/null; then return 0; fi
-    echo "❌ Impossible de télécharger $path"
-    exit 1
-}
-
-download_susfs "fs/susfs.c" "fs/susfs.c"
-download_susfs "include/linux/susfs.h" "include/linux/susfs.h"
-download_susfs "include/linux/susfs_def.h" "include/linux/susfs_def.h"
-
-# ==================== 2c. APPLICATION DU PATCH SUSFS ====================
-echo ""
-echo "=== Application du patch SUSFS ==="
 SUSFS_PATCH=$(find "$GITHUB_WORKSPACE" -maxdepth 1 \( -name "*.patch" -o -name "susfs*.diff" \) -print -quit 2>/dev/null)
 
 if [ -z "$SUSFS_PATCH" ]; then
@@ -71,9 +52,20 @@ REJ_COUNT=$(find . -name "*.rej" 2>/dev/null | wc -l)
 if [ "$REJ_COUNT" -gt 0 ]; then
     echo "⚠️  $REJ_COUNT hunk(s) rejeté(s) :"
     find . -name "*.rej" 2>/dev/null
+else
+    echo "✅ Aucun rejet, le patch s'est appliqué parfaitement."
 fi
 
-# ==================== 2d. CORRECTIFS POST-PATCH SUSFS ====================
+# Vérification dure : les 3 fichiers doivent exister grâce au patch
+for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+    if [ ! -s "$f" ]; then
+        echo "❌ $f n'a pas été créé par le patch. Vérifie ton fichier patch."
+        exit 1
+    fi
+done
+echo "✅ Les 3 fichiers SUSFS ont été créés avec succès par le patch."
+
+# ==================== 2c. CORRECTIFS POST-PATCH SUSFS ====================
 echo ""
 echo "=== Correctifs post-patch SUSFS ==="
 
@@ -82,6 +74,7 @@ if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
     echo "    ✅ fs/Makefile patché"
 fi
 
+# Includes forcés
 python3 - <<'PYEOF'
 import os
 def force_include(filepath, includes):
@@ -100,10 +93,12 @@ def force_include(filepath, includes):
     if new_lines:
         lines = lines[:insert_idx] + new_lines + lines[insert_idx:]
         with open(filepath, 'w') as f: f.writelines(lines)
+
 for f in ['fs/stat.c', 'fs/open.c', 'fs/namespace.c', 'fs/super.c']:
     force_include(f, ['#include <linux/susfs.h>', '#include <linux/susfs_def.h>', '#include <linux/jump_label.h>'])
 PYEOF
 
+# Macros manquantes dans susfs_def.h
 python3 - <<'PYEOF'
 with open('include/linux/susfs_def.h', 'r') as f: sd = f.read()
 if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER' not in sd:
@@ -115,6 +110,7 @@ if 'CL_COPY_MNT_NS' not in sd:
 with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
 PYEOF
 
+# Stubs manquants dans susfs.c et susfs.h
 python3 - <<'PYEOF'
 with open('fs/susfs.c', 'r') as f: sc = f.read()
 if 'susfs_parse_priority_app_strings' not in sc:
@@ -136,6 +132,8 @@ if 'susfs_set_priority_uid_filter' not in sh:
     sh += '\nextern void susfs_set_priority_uid_filter(void __user **user_info);\n'
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
 PYEOF
+
+echo "✅ Correctifs post-patch appliqués"
 
 # ==================== 3. FIXES COMPATIBILITÉ 4.19 (V7.24) ====================
 echo ""
