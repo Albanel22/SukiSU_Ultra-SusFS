@@ -2,15 +2,16 @@
 set -euo pipefail
 
 # =============================================================================
-# V15.2 : SukiSU-Ultra builtin + SUSFS (Workflow cyberc3dr corrigé)
+# V15.3 : SukiSU-Ultra builtin + SUSFS (Workflow cyberc3dr corrigé)
 #         - Patch SUSFS 4.19 depuis JackA1ltman
 #         - Hooks KernelSU : syscall_hook_patches.sh (cyberc3dr)
 #         - Backports : backport_patches.sh (cyberc3dr)
 #         - Config minimale SUSFS (SUS_PATH uniquement)
 #         - FIX : Ne pas redéclarer susfs_set_priority_uid_filter
+#         - FIX : Supprimer ksu_init_rc_hook (incompatible SukiSU-Ultra)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS (Workflow cyberc3dr corrigé) — V15.2 ==="
+echo "=== Build SukiSU-Ultra + SUSFS (Workflow cyberc3dr corrigé) — V15.3 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -43,15 +44,12 @@ echo "✅ intégré"
 echo ""
 echo "=== Clonage des dépôts nécessaires ==="
 
-# Dépôt JackA1ltman pour le patch SUSFS 4.19
 rm -rf /tmp/NonGKI_Jack
 git clone --depth=1 --branch mainline https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/NonGKI_Jack
 
-# Dépôt cyberc3dr pour les scripts de hooks et backports
 rm -rf /tmp/nGKI_Kernel_Build
 git clone --depth=1 --branch rebase https://github.com/cyberc3dr/nGKI_Kernel_Build.git /tmp/nGKI_Kernel_Build
 
-# Vérification
 if [ ! -f "/tmp/NonGKI_Jack/Patches/Patch/susfs_patch_to_4.19.patch" ]; then
     echo "❌ Impossible de trouver susfs_patch_to_4.19.patch dans JackA1ltman"
     exit 1
@@ -70,7 +68,7 @@ cp /tmp/NonGKI_Jack/Patches/Patch/susfs_patch_to_4.19.patch ./
 patch -p1 --forward < susfs_patch_to_4.19.patch || true
 echo "✅ Patch SUSFS appliqué"
 
-# ==================== 5. HOOKS KERNELSU (syscall_hook_patches.sh) ====================
+# ==================== 5. HOOKS KERNELSU ====================
 echo ""
 echo "=== Application des hooks KernelSU (syscall_hook_patches.sh) ==="
 
@@ -78,7 +76,41 @@ cp /tmp/nGKI_Kernel_Build/Patches/syscall_hook_patches.sh ./
 bash syscall_hook_patches.sh ./
 echo "✅ Hooks KernelSU appliqués"
 
-# ==================== 6. BACKPORTS (backport_patches.sh) ====================
+# ==================== 5b. CORRECTIF : Supprimer ksu_init_rc_hook ====================
+echo ""
+echo "=== Correction : Suppression de ksu_init_rc_hook (incompatible SukiSU-Ultra) ==="
+
+if [ -f "fs/read_write.c" ]; then
+    python3 - <<'PYEOF'
+import re
+with open('fs/read_write.c', 'r') as f:
+    c = f.read()
+
+# Supprimer les blocs #ifdef CONFIG_KSU qui utilisent ksu_init_rc_hook
+c = re.sub(r'#ifdef CONFIG_KSU\n(?:[^#]|#(?!endif))*ksu_init_rc_hook(?:[^#]|#(?!endif))*#endif\n?', '', c, flags=re.DOTALL)
+c = re.sub(r'#ifdef CONFIG_KSU\n\s*if \(unlikely\(ksu_init_rc_hook\)\)\n\s*ksu_handle_sys_read\(fd, &buf, &count\);\n#endif\n?', '', c)
+c = re.sub(r'#ifdef CONFIG_KSU\n\s*if \(unlikely\(ksu_vfs_read_hook\)\)\n\s*ksu_handle_sys_read\(fd, &buf, &count\);\n#endif\n?', '', c)
+c = re.sub(r'extern bool ksu_init_rc_hook __read_mostly;\n?', '', c)
+c = re.sub(r'extern bool ksu_vfs_read_hook __read_mostly;\n?', '', c)
+c = re.sub(r'extern __attribute__\(\(cold\)\) int ksu_handle_sys_read\(unsigned int fd,\n\s*char __user \*\*buf_ptr, size_t \*count_ptr\);\n?', '', c)
+c = re.sub(r'#ifdef CONFIG_KSU\n#endif\n?', '', c)
+
+with open('fs/read_write.c', 'w') as f:
+    f.write(c)
+print("  ✅ fs/read_write.c nettoyé")
+PYEOF
+fi
+
+# Vérification finale
+if grep -q "ksu_init_rc_hook" "fs/read_write.c" 2>/dev/null; then
+    echo "  ⚠️  Nettoyage ligne par ligne..."
+    sed -i '/ksu_init_rc_hook/d' fs/read_write.c
+    echo "  ✅ Nettoyage ligne par ligne effectué"
+else
+    echo "  ✅ Aucune référence à ksu_init_rc_hook"
+fi
+
+# ==================== 6. BACKPORTS ====================
 echo ""
 echo "=== Application des backports (backport_patches.sh) ==="
 
@@ -90,13 +122,11 @@ echo "✅ Backports appliqués"
 echo ""
 echo "=== Correctifs post-patch SUSFS ==="
 
-# Ajouter fs/susfs.o dans fs/Makefile
 if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
     echo "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" >> fs/Makefile
     echo "    ✅ fs/Makefile : ligne susfs.o ajoutée"
 fi
 
-# Forcer les includes SUSFS
 python3 - <<'PYEOF'
 import os
 def force_include(filepath, includes):
@@ -122,7 +152,6 @@ for f in ['fs/stat.c', 'fs/open.c', 'fs/namespace.c', 'fs/super.c']:
     force_include(f, ['#include <linux/susfs.h>', '#include <linux/susfs_def.h>', '#include <linux/jump_label.h>'])
 PYEOF
 
-# Ajouter les macros manquantes
 python3 - <<'PYEOF'
 with open('include/linux/susfs_def.h', 'r') as f: sd = f.read()
 if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER' not in sd:
@@ -134,20 +163,14 @@ if 'CL_COPY_MNT_NS' not in sd:
 with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
 PYEOF
 
-# CORRECTION V15.2 : Ne pas redéclarer susfs_set_priority_uid_filter
-# On vérifie uniquement si le NOM de la fonction est absent, pas sa signature exacte.
 python3 - <<'PYEOF'
 with open('fs/susfs.c', 'r') as f: sc = f.read()
 if 'susfs_parse_priority_app_strings' not in sc:
     sc += '\nvoid susfs_parse_priority_app_strings(void) { }\n'
-    print("    ✅ susfs_parse_priority_app_strings ajouté (stub)")
 if 'susfs_is_current_ksu_domain' not in sc:
     sc += '\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
-    print("    ✅ susfs_is_current_ksu_domain ajouté (stub)")
-# On ne touche PAS à susfs_set_priority_uid_filter s'il existe déjà
 if 'susfs_set_priority_uid_filter' not in sc:
-    sc += '\nvoid susfs_set_priority_uid_filter(u64 arg) { }\n'
-    print("    ✅ susfs_set_priority_uid_filter ajouté (stub)")
+    sc += '\nvoid susfs_set_priority_uid_filter(void __user **user_info) { }\n'
 if 'DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)' in sc:
     sc = sc.replace('DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)', 'DEFINE_STATIC_KEY_TRUE(susfs_is_sdcard_android_data_not_decrypted)')
 with open('fs/susfs.c', 'w') as f: f.write(sc)
@@ -155,17 +178,12 @@ with open('fs/susfs.c', 'w') as f: f.write(sc)
 with open('include/linux/susfs.h', 'r') as f: sh = f.read()
 if 'susfs_parse_priority_app_strings' not in sh:
     sh += '\nextern void susfs_parse_priority_app_strings(void);\n'
-    print("    ✅ susfs_parse_priority_app_strings déclaré dans susfs.h")
 if 'susfs_is_current_ksu_domain' not in sh:
     sh += '\nextern bool susfs_is_current_ksu_domain(void);\n'
-    print("    ✅ susfs_is_current_ksu_domain déclaré dans susfs.h")
-# On ne touche PAS à susfs_set_priority_uid_filter s'il existe déjà
 if 'susfs_set_priority_uid_filter' not in sh:
-    sh += '\nextern void susfs_set_priority_uid_filter(u64 arg);\n'
-    print("    ✅ susfs_set_priority_uid_filter déclaré dans susfs.h")
+    sh += '\nextern void susfs_set_priority_uid_filter(void __user **user_info);\n'
 if 'susfs_is_sdcard_android_data_not_decrypted' not in sh:
     sh += '\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
-    print("    ✅ susfs_is_sdcard_android_data_not_decrypted déclaré dans susfs.h")
 else:
     sh = sh.replace('extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted', 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted')
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
@@ -376,7 +394,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V15.2 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V15.3 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -422,7 +440,7 @@ with open(path, 'w') as f: f.write(c)
 PYEOF
 fi
 
-# ==================== 10. CONFIGURATION (MINIMALE POUR TEST) ====================
+# ==================== 10. CONFIGURATION ====================
 echo ""
 echo "=== Configuration SukiSU-Ultra + SUSFS (MINIMALE) ==="
 export ARCH=arm64; export SUBARCH=arm64
@@ -442,7 +460,6 @@ CONFIG_KSU_LSM_SECURITY_HOOKS=y
 CONFIG_KSU_FEATURE_SULOG=y
 CONFIG_KSU_FEATURE_ADBROOT=y
 
-# SUSFS (MINIMAL - UNIQUEMENT SUS_PATH POUR TEST)
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_SUS_PATH=y
 # CONFIG_KSU_SUSFS_SUS_MOUNT is not set
@@ -454,7 +471,6 @@ CONFIG_KSU_SUSFS_SUS_PATH=y
 # CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set
 # CONFIG_KSU_SUSFS_SUS_MAP is not set
 
-# Dépendances
 CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
 CONFIG_KPROBES=y
@@ -494,12 +510,12 @@ else
     exit 1
 fi
 
-# ==================== 13. SAUVEGARDE DU NOYAU ====================
+# ==================== 13. SAUVEGARDE ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v15.2-susfs-minimal"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v15.2-susfs-minimal"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v15.3-susfs-minimal"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v15.3-susfs-minimal"
 
-# ==================== 14. COMPILATION KSUD ====================
+# ==================== 14. KSUD ====================
 echo ""
 echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
@@ -541,7 +557,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v15.2"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v15.3"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -562,7 +578,7 @@ gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable (Google Drive bloqué)."
-    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v15.2-susfs-minimal"
+    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v15.3-susfs-minimal"
     exit 0
 fi
 
@@ -593,11 +609,11 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v15.2-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v15.3-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
 # ==================== 16. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v15.2 (Workflow cyberc3dr corrigé) ==="
+echo "=== BUILD TERMINÉ v15.3 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
