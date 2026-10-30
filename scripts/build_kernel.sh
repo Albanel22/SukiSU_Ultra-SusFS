@@ -89,6 +89,7 @@ if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
     echo "    ✅ fs/Makefile patché"
 fi
 
+# Includes forcés
 python3 - <<'PYEOF'
 import os
 def force_include(filepath, includes):
@@ -112,6 +113,7 @@ for f in ['fs/stat.c', 'fs/open.c', 'fs/namespace.c', 'fs/super.c']:
     force_include(f, ['#include <linux/susfs.h>', '#include <linux/susfs_def.h>', '#include <linux/jump_label.h>'])
 PYEOF
 
+# Fix macros et variables manquantes
 python3 - <<'PYEOF'
 with open('include/linux/susfs_def.h', 'r') as f: sd = f.read()
 if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER' not in sd:
@@ -120,9 +122,13 @@ if 'DEFAULT_KSU_MNT_MINOR_DEV' not in sd:
     sd += '\n#ifndef DEFAULT_KSU_MNT_MINOR_DEV\n#define DEFAULT_KSU_MNT_MINOR_DEV (1 << 12)\n#endif\n'
 if 'CL_COPY_MNT_NS' not in sd:
     sd += '\n#ifndef CL_COPY_MNT_NS\n#define CL_COPY_MNT_NS BIT(25)\n#endif\n'
+# FIX : Ajout de la déclaration manquante pour fs/super.c
+if 'susfs_is_sdcard_android_data_not_decrypted' not in sd:
+    sd += '\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
 with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
 PYEOF
 
+# Fix stubs et variables dans susfs.c et susfs.h
 python3 - <<'PYEOF'
 with open('fs/susfs.c', 'r') as f: sc = f.read()
 if 'susfs_parse_priority_app_strings' not in sc:
