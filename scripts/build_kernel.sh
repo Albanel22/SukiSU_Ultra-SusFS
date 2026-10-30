@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # =============================================================================
-# V15.0 : SukiSU-Ultra builtin + SUSFS (Workflow cyberc3dr exact)
-#         - Patches depuis cyberc3dr/NonGKI_Kernel_Patches (branche common-4.19)
-#         - Hooks KernelSU : syscall_hook_patches.sh (pour SukiSU-Ultra)
-#         - Backports : backport_patches.sh
+# V15.1 : SukiSU-Ultra builtin + SUSFS (Workflow cyberc3dr corrigé)
+#         - Patch SUSFS 4.19 depuis JackA1ltman
+#         - Hooks KernelSU : syscall_hook_patches.sh (cyberc3dr)
+#         - Backports : backport_patches.sh (cyberc3dr)
 #         - Config minimale SUSFS (SUS_PATH uniquement)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS (Workflow cyberc3dr) — V15.0 ==="
+echo "=== Build SukiSU-Ultra + SUSFS (Workflow cyberc3dr corrigé) — V15.1 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -31,36 +31,41 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION SukiSU-Ultra (builtin) ====================
+# ==================== 2. INTÉGRATION SukiSU-Ultra ====================
 echo "=== Intégration SukiSU-Ultra (builtin) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 [ ! -d "drivers/kernelsu" ] && echo "❌ Échec intégration" && exit 1
 echo "✅ intégré"
 
-# ==================== 3. CLONAGE DES DÉPÔTS CYBERC3DR ====================
+# ==================== 3. CLONAGE DES DÉPÔTS ====================
 echo ""
-echo "=== Clonage des dépôts cyberc3dr ==="
+echo "=== Clonage des dépôts nécessaires ==="
 
-# Dépôt des patches SUSFS
-rm -rf /tmp/NonGKI_Kernel_Patches
-git clone --depth=1 --branch common-4.19 https://github.com/cyberc3dr/NonGKI_Kernel_Patches.git /tmp/NonGKI_Kernel_Patches
+# Dépôt JackA1ltman pour le patch SUSFS 4.19
+rm -rf /tmp/NonGKI_Jack
+git clone --depth=1 --branch mainline https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/NonGKI_Jack
 
-# Dépôt des scripts de hooks et backports
+# Dépôt cyberc3dr pour les scripts de hooks et backports
 rm -rf /tmp/nGKI_Kernel_Build
 git clone --depth=1 --branch rebase https://github.com/cyberc3dr/nGKI_Kernel_Build.git /tmp/nGKI_Kernel_Build
 
-if [ ! -f "/tmp/NonGKI_Kernel_Patches/susfs_patch_to_4.19.patch" ]; then
-    echo "❌ Impossible de trouver le patch SUSFS 4.19."
+# Vérification
+if [ ! -f "/tmp/NonGKI_Jack/Patches/Patch/susfs_patch_to_4.19.patch" ]; then
+    echo "❌ Impossible de trouver susfs_patch_to_4.19.patch dans JackA1ltman"
+    exit 1
+fi
+if [ ! -f "/tmp/nGKI_Kernel_Build/Patches/syscall_hook_patches.sh" ]; then
+    echo "❌ Impossible de trouver syscall_hook_patches.sh dans cyberc3dr"
     exit 1
 fi
 echo "✅ Dépôts clonés"
 
 # ==================== 4. APPLICATION DU PATCH SUSFS ====================
 echo ""
-echo "=== Application du patch SUSFS 4.19 ==="
+echo "=== Application du patch SUSFS 4.19 (JackA1ltman) ==="
 
-cp /tmp/NonGKI_Kernel_Patches/susfs_patch_to_4.19.patch ./
+cp /tmp/NonGKI_Jack/Patches/Patch/susfs_patch_to_4.19.patch ./
 patch -p1 --forward < susfs_patch_to_4.19.patch || true
 echo "✅ Patch SUSFS appliqué"
 
@@ -90,7 +95,7 @@ if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
     echo "    ✅ fs/Makefile : ligne susfs.o ajoutée"
 fi
 
-# Forcer les includes SUSFS dans les fichiers clés
+# Forcer les includes SUSFS
 python3 - <<'PYEOF'
 import os
 def force_include(filepath, includes):
@@ -354,7 +359,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V15.0 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V15.1 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -474,8 +479,8 @@ fi
 
 # ==================== 13. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v15.0-susfs-minimal"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v15.0-susfs-minimal"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v15.1-susfs-minimal"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v15.1-susfs-minimal"
 
 # ==================== 14. COMPILATION KSUD ====================
 echo ""
@@ -519,7 +524,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v15.0"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v15.1"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -540,7 +545,7 @@ gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable (Google Drive bloqué)."
-    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v15.0-susfs-minimal"
+    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v15.1-susfs-minimal"
     exit 0
 fi
 
@@ -571,11 +576,11 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v15.0-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v15.1-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
 # ==================== 16. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v15.0 (Workflow cyberc3dr complet) ==="
+echo "=== BUILD TERMINÉ v15.1 (Workflow cyberc3dr corrigé) ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
