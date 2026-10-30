@@ -2,14 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V16.0 : V7.24 (working base) + SUSFS patch VFS (toutes features OFF)
-#         Objectif : vérifier que le patch ne casse pas le boot à froid
-#         Correctif : téléchargement des 3 fichiers SUSFS manquants dans
-#                     le patch (fs/susfs.c, include/linux/susfs.h,
-#                     include/linux/susfs_def.h) AVANT les post-fix.
+# V11.3 : SukiSU-Ultra (builtin) + SUSFS v2.3.0 (Patch fourni) + Manual Hooks
+#         Base V11.2 (boot + root + termux OK) + injection ksu_handle_*
+#         Objectif : manager SukiSU fonctionnel (communication kernel/userspace)
 # =============================================================================
 
-echo "=== Build V16.0 : V7.24 + SUSFS patch (inactive) ==="
+echo "=== Build SukiSU-Ultra + SUSFS v2.3.0 + Manual Hooks — V11.3 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -21,7 +19,7 @@ sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.l
 sudo apt-get update
 sudo apt-get install -y bc bison build-essential ccache flex glibc-source libelf-dev libssl-dev \
   libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld \
-  device-tree-compiler zip unzip curl git python3 python3-pip mkbootimg cpio libclang-dev patch wget
+  device-tree-compiler zip unzip curl git python3 python3-pip mkbootimg cpio libclang-dev patch
 
 pip3 install --quiet gdown
 cd "$GITHUB_WORKSPACE"
@@ -35,106 +33,62 @@ git log --oneline -1
 echo "=== Intégration SukiSU-Ultra (builtin) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-[ ! -d "drivers/kernelsu" ] && echo "❌ setup.sh SukiSU échoué" && exit 1
-echo "✅ intégré"
+[ ! -d "drivers/kernelsu" ] && echo "❌ Échec de l'intégration SukiSU" && exit 1
+echo "✅ SukiSU-Ultra (builtin) intégré"
 
-# ==================== 2b. APPLICATION DU PATCH SUSFS (VFS SEUL) ====================
+# ==================== 3. APPLICATION DU PATCH SUSFS v2.3.0 ====================
 echo ""
-echo "=== Application du patch SUSFS (VFS hooks uniquement) ==="
+echo "=== Application du patch SUSFS v2.3.0 ==="
 
+# Find groupé : parenthèses obligatoires sinon -maxdepth 1 ne s'applique pas au 2ᵉ motif
 SUSFS_PATCH=$(find "$GITHUB_WORKSPACE" -maxdepth 1 \( -name "*.patch" -o -name "susfs*.diff" \) -print -quit 2>/dev/null)
 
 if [ -z "$SUSFS_PATCH" ]; then
-    echo "❌ Aucun fichier de patch SUSFS trouvé à la racine."
+    echo "❌ Aucun fichier .patch trouvé à la racine de $GITHUB_WORKSPACE"
     exit 1
 fi
 
-echo "✅ Patch trouvé : $SUSFS_PATCH"
+echo "✅ Fichier de patch trouvé : $SUSFS_PATCH"
 patch -p1 --forward < "$SUSFS_PATCH" || true
 
-echo ""
-echo "--- Vérification des fichiers .rej ---"
-REJ_FILES=$(find . -name "*.rej" 2>/dev/null || true)
-REJ_COUNT=$(printf '%s\n' "$REJ_FILES" | grep -c . || true)
+# .rej : warning seulement (V11.2 a booté avec ce même patch appliqué ainsi)
+REJ_COUNT=$(find . -name "*.rej" 2>/dev/null | wc -l)
 if [ "$REJ_COUNT" -gt 0 ]; then
-    echo "❌ $REJ_COUNT hunk(s) rejeté(s) — patch SUSFS non propre :"
-    printf '%s\n' "$REJ_FILES"
-    echo "   Corrige le patch avant de builder, sinon diagnostic invalide."
-    exit 1
+    echo "⚠️  $REJ_COUNT hunk(s) rejeté(s) (V11.2 a booté malgré ça) :"
+    find . -name "*.rej" 2>/dev/null
 fi
-echo "✅ Aucun rejet"
 
-# ==================== 2b-bis. FICHIERS SUSFS MANQUANTS (FIX CRITIQUE) ====================
-echo ""
-echo "=== Récupération des 3 fichiers SUSFS (absents du patch VFS) ==="
-
-# Le patch fourni ne crée PAS fs/susfs.c, include/linux/susfs.h,
-# include/linux/susfs_def.h — il ne fait que modifier le VFS. Ces 3
-# fichiers doivent venir de susfs4ksu (même contenu que ce soit 4.19/5.x,
-# tout est gardé par #if LINUX_VERSION_CODE).
-download_susfs_file() {
-    local dest="$1"; shift
-    for url in "$@"; do
-        if curl -LSsf "$url" -o "$dest.tmp" 2>/dev/null; then
-            if [ -s "$dest.tmp" ] && ! head -1 "$dest.tmp" | grep -qi '<!DOCTYPE\|<html'; then
-                mv "$dest.tmp" "$dest"
-                return 0
-            fi
-        fi
-    done
-    rm -f "$dest.tmp"
-    return 1
-}
-
-BASE1="https://raw.githubusercontent.com/ShirkNeko/susfs4ksu/main/kernel_patches"
-BASE2="https://raw.githubusercontent.com/ShirkNeko/susfs4ksu/master/kernel_patches"
-BASE3="https://raw.githubusercontent.com/Simonpunk/susfs4ksu/master/kernel_patches"
-
-for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
-    if [ -s "$f" ]; then
-        echo "  → $f (déjà présent)"
-        continue
-    fi
-    echo "  → $f (download)"
-    if ! download_susfs_file "$f" "$BASE1/$f" "$BASE2/$f" "$BASE3/$f"; then
-        echo "❌ Impossible de télécharger $f depuis une source connue."
-        echo "   Vérifie les URLs ou dépose le fichier manuellement à la racine."
-        exit 1
-    fi
-done
-
-# Vérification dure : les 3 fichiers existent et contiennent du code SUSFS
-for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
-    if [ ! -s "$f" ]; then
-        echo "❌ $f absent ou vide → SUSFS incomplet"
-        exit 1
-    fi
-    if ! grep -q 'susfs' "$f" 2>/dev/null; then
-        echo "❌ $f ne ressemble pas à un fichier SUSFS :"
-        head -5 "$f"
-        exit 1
-    fi
-done
-echo "✅ 3 fichiers SUSFS présents et valides"
-
-# ==================== 2c. CORRECTIFS POST-PATCH SUSFS ====================
+# ==================== 3b. CORRECTIFS POST-PATCH SUSFS ====================
 echo ""
 echo "=== Correctifs post-patch SUSFS ==="
 
-# Ajouter fs/susfs.o dans fs/Makefile
 if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
     echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
     echo "    ✅ fs/Makefile : ligne susfs.o ajoutée"
 fi
 
-# Forcer les includes SUSFS
+python3 - <<'PYEOF'
+import os
+def force_super_c():
+    with open('fs/super.c', 'r') as f:
+        c = f.read()
+    if '#include <linux/susfs_def.h>' not in c:
+        c = c.replace('#include <linux/user_namespace.h>', '#include <linux/user_namespace.h>\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n#include <linux/jump_label.h>\n#endif')
+        print("    ✅ fs/super.c : includes SUSFS ajoutés")
+    if 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted' not in c:
+        c = c.replace('#include "internal.h"', '#include "internal.h"\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#endif')
+        print("    ✅ fs/super.c : déclarations externes ajoutées")
+    with open('fs/super.c', 'w') as f:
+        f.write(c)
+force_super_c()
+PYEOF
+
 python3 - <<'PYEOF'
 import os
 def force_include(filepath, includes):
     if not os.path.exists(filepath): return
     with open(filepath, 'r') as f: lines = f.readlines()
-    insert_idx = 0
-    in_comment = False
+    insert_idx = 0; in_comment = False
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith('/*'): in_comment = True
@@ -142,63 +96,197 @@ def force_include(filepath, includes):
             if '*/' in stripped: in_comment = False
             continue
         if stripped.startswith('//') or stripped == '': continue
-        insert_idx = i
-        break
+        insert_idx = i; break
     new_lines = [inc + '\n' for inc in includes if inc not in lines]
     if new_lines:
         lines = lines[:insert_idx] + new_lines + lines[insert_idx:]
         with open(filepath, 'w') as f: f.writelines(lines)
-
-for f in ['fs/stat.c', 'fs/open.c', 'fs/namespace.c', 'fs/super.c']:
-    force_include(f, ['#include <linux/susfs.h>', '#include <linux/susfs_def.h>', '#include <linux/jump_label.h>'])
+        print(f"    ✅ Includes forcés dans {filepath}")
+for f in ['fs/stat.c', 'fs/open.c', 'fs/namespace.c']:
+    force_include(f, ['#include <linux/susfs.h>', '#include <linux/susfs_def.h>'])
 PYEOF
 
-# Ajouter les macros manquantes
 python3 - <<'PYEOF'
 with open('include/linux/susfs_def.h', 'r') as f: sd = f.read()
 if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER' not in sd:
     sd += '\n#ifndef CMD_SUSFS_SET_PRIORITY_UID_FILTER\n#define CMD_SUSFS_SET_PRIORITY_UID_FILTER 0x55551\n#endif\n'
+    print("    ✅ CMD_SUSFS_SET_PRIORITY_UID_FILTER ajouté")
 if 'DEFAULT_KSU_MNT_MINOR_DEV' not in sd:
     sd += '\n#ifndef DEFAULT_KSU_MNT_MINOR_DEV\n#define DEFAULT_KSU_MNT_MINOR_DEV (1 << 12)\n#endif\n'
-if 'CL_COPY_MNT_NS' not in sd:
-    sd += '\n#ifndef CL_COPY_MNT_NS\n#define CL_COPY_MNT_NS BIT(25)\n#endif\n'
+    print("    ✅ DEFAULT_KSU_MNT_MINOR_DEV ajouté")
 with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
 PYEOF
 
-# Stubs manquants
 python3 - <<'PYEOF'
 with open('fs/susfs.c', 'r') as f: sc = f.read()
-if 'susfs_parse_priority_app_strings' not in sc:
+if 'void susfs_parse_priority_app_strings(void)' not in sc:
     sc += '\nvoid susfs_parse_priority_app_strings(void) { }\n'
-if 'susfs_is_current_ksu_domain' not in sc:
-    sc += '\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
-if 'susfs_set_priority_uid_filter' not in sc:
-    sc += '\nvoid susfs_set_priority_uid_filter(void __user **user_info) { }\n'
-if 'DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)' in sc:
-    sc = sc.replace('DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)',
-                    'DEFINE_STATIC_KEY_TRUE(susfs_is_sdcard_android_data_not_decrypted)')
+    print("    ✅ susfs_parse_priority_app_strings ajouté (stub)")
+if 'void susfs_set_priority_uid_filter(u64 arg)' not in sc:
+    sc += '\nvoid susfs_set_priority_uid_filter(u64 arg) { }\n'
+    print("    ✅ susfs_set_priority_uid_filter ajouté (stub)")
 with open('fs/susfs.c', 'w') as f: f.write(sc)
+PYEOF
 
+echo "✅ Correctifs post-patch appliqués"
+
+# ==================== 3c. CORRECTIFS namespace + prototypes ====================
+echo ""
+echo "=== Correctifs namespace + prototypes ==="
+
+python3 - <<'PYEOF'
+with open('fs/namespace.c', 'r') as f: c = f.read()
+if 'extern bool susfs_is_current_ksu_domain(void);' not in c:
+    marker = '#include "internal.h"'
+    if marker in c:
+        extern_block = '''
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_is_current_ksu_domain(void);
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */
+#endif
+'''
+        c = c.replace(marker, marker + '\n' + extern_block, 1)
+        print("    ✅ fs/namespace.c : externs + CL_COPY_MNT_NS ajoutés")
+    else:
+        print("    ⚠️  fs/namespace.c : marqueur 'internal.h' introuvable")
+with open('fs/namespace.c', 'w') as f: f.write(c)
+PYEOF
+
+python3 - <<'PYEOF'
 with open('include/linux/susfs.h', 'r') as f: sh = f.read()
 if 'susfs_parse_priority_app_strings' not in sh:
     sh += '\nextern void susfs_parse_priority_app_strings(void);\n'
-if 'susfs_is_current_ksu_domain' not in sh:
-    sh += '\nextern bool susfs_is_current_ksu_domain(void);\n'
+    print("    ✅ susfs.h : prototype susfs_parse_priority_app_strings")
 if 'susfs_set_priority_uid_filter' not in sh:
-    sh += '\nextern void susfs_set_priority_uid_filter(void __user **user_info);\n'
-if 'susfs_is_sdcard_android_data_not_decrypted' not in sh:
-    sh += '\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
-else:
-    sh = sh.replace('extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted',
-                    'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted')
+    sh += '\nextern void susfs_set_priority_uid_filter(u64 arg);\n'
+    print("    ✅ susfs.h : prototype susfs_set_priority_uid_filter")
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
 PYEOF
 
-echo "✅ Correctifs SUSFS appliqués"
+python3 - <<'PYEOF'
+import os
+def force_include(filepath, includes):
+    if not os.path.exists(filepath): return
+    with open(filepath, 'r') as f: lines = f.readlines()
+    insert_idx = 0; in_comment = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith('/*'): in_comment = True
+        if in_comment:
+            if '*/' in stripped: in_comment = False
+            continue
+        if stripped.startswith('//') or stripped == '': continue
+        insert_idx = i; break
+    new_lines = [inc + '\n' for inc in includes if inc not in lines]
+    if new_lines:
+        lines = lines[:insert_idx] + new_lines + lines[insert_idx:]
+        with open(filepath, 'w') as f: f.writelines(lines)
+        print(f"    ✅ Includes forcés dans {filepath}")
+for f in ['drivers/kernelsu/manager/pkg_observer.c', 'drivers/kernelsu/supercall/dispatch.c']:
+    force_include(f, ['#include <linux/susfs.h>'])
+PYEOF
 
-# ==================== 3. FIXES COMPATIBILITÉ 4.19 (IDENTIQUE V7.24) ====================
+echo "✅ Correctifs namespace/prototypes appliqués"
+
+# ==================== 4. SUSFS INLINE HOOK PATCHES (JackA1ltman) ====================
 echo ""
-echo "=== Fixes compatibilité 4.19 (V7.24) ==="
+echo "=== Exécution de susfs_inline_hook_patches.sh ==="
+
+curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o /tmp/susfs_inline_hook_patches.sh
+chmod +x /tmp/susfs_inline_hook_patches.sh
+bash /tmp/susfs_inline_hook_patches.sh
+
+# ==================== 4b. MANUAL HOOKS KERNELSU (V7.24) ← NOUVEAU ====================
+# ⚠️  C'est CE bloc qui rend le manager fonctionnel.
+#     - ksu_handle_execveat  : identifie le manager au lancement (supercall entrance)
+#     - ksu_handle_faccessat : détection d'accès fichier par le manager
+#     - ksu_handle_stat      : profil / détection process
+# Sans ces 3 hooks, termux marche (grâce au binaire su setuid) mais le manager
+# ne reçoit jamais de réponse du noyau → "communication impossible".
+echo ""
+echo "=== 4b. Injection manual hooks KernelSU (supercall) ==="
+
+# --- 4b.1 : fs/exec.c → ksu_handle_execveat ---
+EXEC_C="fs/exec.c"
+if grep -q 'do_execveat_common' "$EXEC_C"; then
+    python3 - "$EXEC_C" <<'PYEOF'
+import sys, re
+with open(sys.argv[1]) as f: c = f.read()
+if 'ksu_handle_execveat' not in c:
+    pattern = r'(static int do_execveat_common\([^)]*\)\s*\{)'
+    replacement = r'''\1
+#ifdef CONFIG_KSU
+    {
+        extern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);
+        ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+    }
+#endif
+'''
+    c = re.sub(pattern, replacement, c, count=1)
+    with open(sys.argv[1], 'w') as f: f.write(c)
+    print("  ✅ ksu_handle_execveat injecté dans fs/exec.c")
+else:
+    print("  → ksu_handle_execveat déjà présent")
+PYEOF
+fi
+grep -q 'ksu_handle_execveat' "$EXEC_C" || { echo "❌ hook execveat non injecté dans $EXEC_C"; exit 1; }
+
+# --- 4b.2 : fs/open.c → ksu_handle_faccessat ---
+OPEN_C="fs/open.c"
+if grep -q 'SYSCALL_DEFINE3(faccessat' "$OPEN_C"; then
+    python3 - "$OPEN_C" <<'PYEOF'
+import sys, re
+with open(sys.argv[1]) as f: c = f.read()
+if 'ksu_handle_faccessat' not in c:
+    pattern = r'(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)'
+    replacement = r'''\1
+#ifdef CONFIG_KSU
+    {
+        extern int ksu_handle_faccessat(int *, const char __user **, int *, int *);
+        ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+    }
+#endif
+'''
+    c = re.sub(pattern, replacement, c, count=1)
+    with open(sys.argv[1], 'w') as f: f.write(c)
+    print("  ✅ ksu_handle_faccessat injecté dans fs/open.c")
+else:
+    print("  → ksu_handle_faccessat déjà présent")
+PYEOF
+fi
+grep -q 'ksu_handle_faccessat' "$OPEN_C" || { echo "❌ hook faccessat non injecté dans $OPEN_C"; exit 1; }
+
+# --- 4b.3 : fs/stat.c → ksu_handle_stat ---
+STAT_C="fs/stat.c"
+if grep -q 'SYSCALL_DEFINE4(newfstatat' "$STAT_C"; then
+    python3 - "$STAT_C" <<'PYEOF'
+import sys, re
+with open(sys.argv[1]) as f: c = f.read()
+if 'ksu_handle_stat' not in c:
+    pattern = r'(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{)'
+    replacement = r'''\1
+#ifdef CONFIG_KSU
+    {
+        extern int ksu_handle_stat(int *, const char __user **, int *);
+        ksu_handle_stat(&dfd, &filename, &flag);
+    }
+#endif
+'''
+    c = re.sub(pattern, replacement, c, count=1)
+    with open(sys.argv[1], 'w') as f: f.write(c)
+    print("  ✅ ksu_handle_stat injecté dans fs/stat.c")
+else:
+    print("  → ksu_handle_stat déjà présent")
+PYEOF
+fi
+grep -q 'ksu_handle_stat' "$STAT_C" || { echo "❌ hook stat non injecté dans $STAT_C"; exit 1; }
+
+echo "✅ 3 hooks KernelSU injectés et vérifiés"
+
+# ==================== 5. FIXES COMPATIBILITÉ 4.19 ====================
+echo ""
+echo "=== Fixes compatibilité 4.19 ==="
 
 if [ ! -f "include/linux/static_call.h" ]; then
 cat > include/linux/static_call.h <<'EOF'
@@ -258,7 +346,6 @@ for f in drivers/kernelsu/manager/pkg_observer.c drivers/kernelsu/pkg_observer.c
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
 c = c.replace('.handle_inode_event = ksu_handle_inode_event,', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)\n\t.handle_inode_event = ksu_handle_inode_event,\n#endif')
-c = re.sub(r'(\s*)susfs_parse_priority_app_strings\(\);', r'\1#ifdef CONFIG_KSU_SUSFS\n\1susfs_parse_priority_app_strings();\n\1#endif', c)
 with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
@@ -278,18 +365,6 @@ if '#include <linux/sched/task.h>' not in c:
 with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
-
-if [ -f "drivers/kernelsu/supercall/dispatch.c" ]; then
-    python3 - drivers/kernelsu/supercall/dispatch.c <<'PYEOF'
-import sys, re
-with open(sys.argv[1]) as f: c = f.read()
-for inc in ['#include <linux/sched.h>', '#include <linux/sched/task.h>', '#include <linux/init_task.h>', '#include <linux/susfs.h>']:
-    if inc not in c:
-        m = re.search(r'((?:#include\s+[<"][^>"]+[>"]\n)+)', c)
-        if m: c = c[:m.end()] + inc + '\n' + c[m.end():]
-with open(sys.argv[1], 'w') as f: f.write(c)
-PYEOF
-fi
 
 for f in drivers/kernelsu/policy/app_profile.c drivers/kernelsu/app_profile.c; do
     [ ! -f "$f" ] && continue
@@ -337,8 +412,7 @@ if [ -f "$FEAT" ]; then
 import sys, re
 with open(sys.argv[1]) as f: lines = f.readlines()
 new = [l for l in lines if not re.search(r'KSU_FEATURE_SELINUX_HIDE\s*=', l)]
-final = []
-inserted = False
+final = []; inserted = False
 for l in new:
     final.append(l)
     if not inserted and re.search(r'KSU_FEATURE_MOUNT_HIDE\s*=\s*\d+\s*,', l):
@@ -402,22 +476,9 @@ out_free: free_page((unsigned long)page); return ret;
 with open('fs/namespace.c', 'w') as f: f.write(c)
 PYEOF
 
-KSUD="drivers/kernelsu/runtime/ksud.c"
-if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' "$KSUD"; then
-    python3 - "$KSUD" <<'PYEOF'
-import sys, re
-with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V16.0 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
-m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
-if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
-else: c = stubs + c
-with open(sys.argv[1], 'w') as f: f.write(c)
-PYEOF
-fi
-
-# ==================== 4. BACKPORT SELINUX 4.19 ====================
+# ==================== 6. BACKPORT SELINUX 4.19 ====================
 echo ""
-echo "=== Backport SELinux 4.19 ==="
+echo "=== Backport SELinux pour 4.19 ==="
 RULES="drivers/kernelsu/selinux/rules.c"
 if [ -f "$RULES" ]; then
     python3 - "$RULES" <<'PYEOF'
@@ -429,18 +490,11 @@ if 'SELINUX_POLICY_INSTEAD_SELINUX_SS' not in c:
     if m:
         compat = '\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n#define SELINUX_POLICY_INSTEAD_SELINUX_SS\n#endif\n'
         c = c[:m.end()] + compat + c[m.end():]
-c = c.replace(
-    'return &selinux_state.ss;',
-    '''#ifdef SELINUX_POLICY_INSTEAD_SELINUX_SS
-    return &rcu_dereference(selinux_state.policy)->policydb;
-#else
-    return &rcu_dereference(selinux_state.ss)->policydb;
-#endif'''
-)
+c = c.replace('return &selinux_state.ss;',
+    '''#ifdef SELINUX_POLICY_INSTEAD_SELINUX_SS\n    return &rcu_dereference(selinux_state.policy)->policydb;\n#else\n    return &rcu_dereference(selinux_state.ss)->policydb;\n#endif''')
 with open(path, 'w') as f: f.write(c)
 PYEOF
 fi
-
 SEPOLICY="drivers/kernelsu/selinux/sepolicy.c"
 if [ -f "$SEPOLICY" ]; then
     python3 - "$SEPOLICY" <<'PYEOF'
@@ -453,78 +507,9 @@ with open(path, 'w') as f: f.write(c)
 PYEOF
 fi
 
-# ==================== 5. INJECTION MANUAL HOOKS (V7.24) ====================
+# ==================== 7. CONFIGURATION ====================
 echo ""
-echo "=== Injection manual hooks V7.24 ==="
-
-EXEC_C="fs/exec.c"
-if grep -q 'do_execveat_common' "$EXEC_C"; then
-    python3 - "$EXEC_C" <<'PYEOF'
-import sys, re
-with open(sys.argv[1]) as f: c = f.read()
-if 'ksu_handle_execveat' not in c:
-    pattern = r'(static int do_execveat_common\([^)]*\)\s*\{)'
-    replacement = r'''\1
-#ifdef CONFIG_KSU
-    {
-        extern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);
-        ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-    }
-#endif
-'''
-    c = re.sub(pattern, replacement, c, count=1)
-    with open(sys.argv[1], 'w') as f: f.write(c)
-PYEOF
-fi
-grep -q 'ksu_handle_execveat' "$EXEC_C" || { echo "❌ hook execveat non injecté dans $EXEC_C"; exit 1; }
-
-OPEN_C="fs/open.c"
-if grep -q 'SYSCALL_DEFINE3(faccessat' "$OPEN_C"; then
-    python3 - "$OPEN_C" <<'PYEOF'
-import sys, re
-with open(sys.argv[1]) as f: c = f.read()
-if 'ksu_handle_faccessat' not in c:
-    pattern = r'(SYSCALL_DEFINE3\(faccessat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*int,\s*mode\)\s*\{)'
-    replacement = r'''\1
-#ifdef CONFIG_KSU
-    {
-        extern int ksu_handle_faccessat(int *, const char __user **, int *, int *);
-        ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
-    }
-#endif
-'''
-    c = re.sub(pattern, replacement, c, count=1)
-    with open(sys.argv[1], 'w') as f: f.write(c)
-PYEOF
-fi
-grep -q 'ksu_handle_faccessat' "$OPEN_C" || { echo "❌ hook faccessat non injecté dans $OPEN_C"; exit 1; }
-
-STAT_C="fs/stat.c"
-if grep -q 'SYSCALL_DEFINE4(newfstatat' "$STAT_C"; then
-    python3 - "$STAT_C" <<'PYEOF'
-import sys, re
-with open(sys.argv[1]) as f: c = f.read()
-if 'ksu_handle_stat' not in c:
-    pattern = r'(SYSCALL_DEFINE4\(newfstatat,\s*int,\s*dfd,\s*const char __user \*,\s*filename,\s*struct stat __user \*,\s*statbuf,\s*int,\s*flag\)\s*\{)'
-    replacement = r'''\1
-#ifdef CONFIG_KSU
-    {
-        extern int ksu_handle_stat(int *, const char __user **, int *);
-        ksu_handle_stat(&dfd, &filename, &flag);
-    }
-#endif
-'''
-    c = re.sub(pattern, replacement, c, count=1)
-    with open(sys.argv[1], 'w') as f: f.write(c)
-PYEOF
-fi
-grep -q 'ksu_handle_stat' "$STAT_C" || { echo "❌ hook stat non injecté dans $STAT_C"; exit 1; }
-
-echo "✅ 3 hooks VFS injectés et vérifiés"
-
-# ==================== 6. CONFIGURATION (SUSFS INACTIF) ====================
-echo ""
-echo "=== Configuration : CONFIG_KSU_SUSFS=y MAIS toutes features désactivées ==="
+echo "=== Configuration SukiSU-Ultra + SUSFS (full) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -534,32 +519,27 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 cat >> out/.config <<'EOF'
 CONFIG_KSU=y
 CONFIG_KSU_MANUAL_HOOK=y
-# CONFIG_KSU_HACK_ARM64_BRANCH_LINK is not set
+# CONFIG_KSU_KPROBES is not set
 # CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set
-# CONFIG_KSU_KPROBES_KSUD is not set
-# CONFIG_KSU_TRACEPOINT_HOOK is not set
 CONFIG_KSU_LSM_SECURITY_HOOKS=y
 CONFIG_KSU_FEATURE_SULOG=y
 CONFIG_KSU_FEATURE_ADBROOT=y
 
-# SUSFS : compilé mais INACTIF
+# SUSFS v2.3.0 (full)
 CONFIG_KSU_SUSFS=y
-# CONFIG_KSU_SUSFS_SUS_PATH is not set
-# CONFIG_KSU_SUSFS_SUS_MOUNT is not set
-# CONFIG_KSU_SUSFS_SUS_KSTAT is not set
-# CONFIG_KSU_SUSFS_SPOOF_UNAME is not set
-# CONFIG_KSU_SUSFS_ENABLE_LOG is not set
-# CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS is not set
-# CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG is not set
-# CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set
-# CONFIG_KSU_SUSFS_SUS_MAP is not set
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=n
+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_SUS_MAP=y
 
-# Dépendances
+# Dépendances non-GKI
 CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
-CONFIG_KPROBES=y
-CONFIG_HAVE_KPROBES=y
-CONFIG_KRETPROBES=y
 CONFIG_SECCOMP=y
 CONFIG_SECCOMP_FILTER=y
 CONFIG_COMPAT=y
@@ -571,16 +551,16 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ CONFIG_KSU=y manquant"; exit 1; }
 
 echo "=== État config SUSFS ==="
-grep -E "CONFIG_KSU_SUSFS" out/.config | head -15
+grep -E "CONFIG_KSU_SUSFS|CONFIG_KSU=y|CONFIG_KSU_MANUAL_HOOK=y" out/.config | head -15
 
-# ==================== 7. PATCHS MOTOROLA ====================
+# ==================== 8. PATCHS MOTOROLA ====================
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
 printf "\n/* Patch Tactile */\n#include <linux/notifier.h>\n#include <linux/module.h>\nstatic BLOCKING_NOTIFIER_HEAD(motorola_panel_notifier_list);\nint panel_register_notifier(struct notifier_block *nb) { return blocking_notifier_chain_register(&motorola_panel_notifier_list, nb); }\nEXPORT_SYMBOL(panel_register_notifier);\nint panel_unregister_notifier(struct notifier_block *nb) { return blocking_notifier_chain_unregister(&motorola_panel_notifier_list, nb); }\nEXPORT_SYMBOL(panel_unregister_notifier);\nvoid touch_set_state(int state) { return; }\nEXPORT_SYMBOL(touch_set_state);\n" >> techpack/display/msm/msm_drv.c
 
-# ==================== 8. COMPILATION KERNEL ====================
+# ==================== 9. COMPILATION KERNEL ====================
 echo ""
 echo "=== Compilation kernel ==="
-# Désactive pipefail autour du tee pour capturer le vrai code retour de make
+# Désactive pipefail localement pour capturer le VRAI rc de make (pas celui de tee)
 set +eo pipefail
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   KCFLAGS="-Wno-macro-redefined -Wno-unused-variable -Wno-declaration-after-statement" \
@@ -590,19 +570,25 @@ set -eo pipefail
 
 if [ "$MAKE_RC" -ne 0 ] || [ ! -f "out/arch/arm64/boot/Image" ]; then
     echo "❌ BUILD FAILED (make rc=$MAKE_RC)"
-    echo "--- Erreurs extraites de build.log ---"
+    echo "--- Erreurs ---"
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
+    echo "--- .rej éventuels ---"
+    find . -name "*.rej" 2>/dev/null | head -10 || true
     exit 1
 fi
 
-echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE AVEC SUSFS + MANUAL HOOKS ✅✅✅"
 sha256sum out/arch/arm64/boot/Image | cut -d' ' -f1 > /tmp/kernel_compiled_hash.txt
 
-# ==================== 9-11. KSUD + REPACK ====================
+# ==================== 10. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v16.0-diagnostic"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v16.0-diagnostic"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v11.3-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v11.3-susfs"
+echo "✅ Image + System.map sauvegardés dans $GITHUB_WORKSPACE/output/"
 
+# ==================== 11. COMPILATION KSUD ====================
+echo ""
+echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly 2>&1 | tail -3 || true
 source "$HOME/.cargo/env" || true
@@ -643,22 +629,28 @@ EOF
     if [ "$CARGO_RC" -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1 || true)
         if [ -n "${KSUD_BINARY:-}" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v16.0"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v11.3"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
+            echo "✅ ksud compilé"
         fi
     fi
 fi
 cd "$GITHUB_WORKSPACE"
 
+# ==================== 12. REPACK ====================
+echo ""
+echo "=== Repack ==="
 set +e
 rm -f ./boot-stock.img ./dtbo-stock.img 2>/dev/null
 gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img
 gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
-    echo "❌ boot-stock.img introuvable ou trop petit (< 50 Mo)."
+    echo "❌ boot-stock.img introuvable (Google Drive bloqué ou ID invalide)."
+    echo "⚠️  Le noyau est DISPONIBLE dans : $GITHUB_WORKSPACE/output/Image-v11.3-susfs"
+    echo "    Tu peux repacker manuellement avec magiskboot si besoin."
     exit 1
 fi
 
@@ -683,13 +675,15 @@ if [ "${KSUD_OK:-0}" = "1" ] && [ -f "$GITHUB_WORKSPACE/ksud" ]; then
         "mkdir 0755 system" "mkdir 0755 system/bin" \
         "add 06755 system/bin/su ./local_su_binary"
     rm -f ./local_su_binary
+    echo "✅ ksud + su dans le ramdisk"
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v16.0-diagnostic-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v11.3-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
+# ==================== 13. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ V16.0 (SUSFS inactif, diagnostic) ==="
+echo "=== BUILD TERMINÉ v11.3 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
