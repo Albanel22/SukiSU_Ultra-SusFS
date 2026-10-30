@@ -2,14 +2,15 @@
 set -euo pipefail
 
 # =============================================================================
-# V15.1 : SukiSU-Ultra builtin + SUSFS (Workflow cyberc3dr corrigé)
+# V15.2 : SukiSU-Ultra builtin + SUSFS (Workflow cyberc3dr corrigé)
 #         - Patch SUSFS 4.19 depuis JackA1ltman
 #         - Hooks KernelSU : syscall_hook_patches.sh (cyberc3dr)
 #         - Backports : backport_patches.sh (cyberc3dr)
 #         - Config minimale SUSFS (SUS_PATH uniquement)
+#         - FIX : Ne pas redéclarer susfs_set_priority_uid_filter
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS (Workflow cyberc3dr corrigé) — V15.1 ==="
+echo "=== Build SukiSU-Ultra + SUSFS (Workflow cyberc3dr corrigé) — V15.2 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -133,24 +134,40 @@ if 'CL_COPY_MNT_NS' not in sd:
 with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
 PYEOF
 
-# Ajouter les stubs manquants
+# CORRECTION V15.2 : Ne pas redéclarer susfs_set_priority_uid_filter
+# On vérifie uniquement si le NOM de la fonction est absent, pas sa signature exacte.
 python3 - <<'PYEOF'
 with open('fs/susfs.c', 'r') as f: sc = f.read()
-if 'void susfs_parse_priority_app_strings(void)' not in sc: sc += '\nvoid susfs_parse_priority_app_strings(void) { }\n'
-if 'void susfs_set_priority_uid_filter(u64 arg)' not in sc: sc += '\nvoid susfs_set_priority_uid_filter(u64 arg) { }\n'
-if 'bool susfs_is_current_ksu_domain(void)' not in sc: sc += '\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
+if 'susfs_parse_priority_app_strings' not in sc:
+    sc += '\nvoid susfs_parse_priority_app_strings(void) { }\n'
+    print("    ✅ susfs_parse_priority_app_strings ajouté (stub)")
+if 'susfs_is_current_ksu_domain' not in sc:
+    sc += '\nbool susfs_is_current_ksu_domain(void) { return false; }\n'
+    print("    ✅ susfs_is_current_ksu_domain ajouté (stub)")
+# On ne touche PAS à susfs_set_priority_uid_filter s'il existe déjà
+if 'susfs_set_priority_uid_filter' not in sc:
+    sc += '\nvoid susfs_set_priority_uid_filter(u64 arg) { }\n'
+    print("    ✅ susfs_set_priority_uid_filter ajouté (stub)")
 if 'DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)' in sc:
     sc = sc.replace('DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)', 'DEFINE_STATIC_KEY_TRUE(susfs_is_sdcard_android_data_not_decrypted)')
 with open('fs/susfs.c', 'w') as f: f.write(sc)
 
 with open('include/linux/susfs.h', 'r') as f: sh = f.read()
-if 'extern void susfs_parse_priority_app_strings(void)' not in sh: sh += '\nextern void susfs_parse_priority_app_strings(void);\n'
-if 'extern void susfs_set_priority_uid_filter(u64 arg)' not in sh: sh += '\nextern void susfs_set_priority_uid_filter(u64 arg);\n'
-if 'extern bool susfs_is_current_ksu_domain(void)' not in sh: sh += '\nextern bool susfs_is_current_ksu_domain(void);\n'
-if 'extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted' in sh:
-    sh = sh.replace('extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted', 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted')
-elif 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted' not in sh:
+if 'susfs_parse_priority_app_strings' not in sh:
+    sh += '\nextern void susfs_parse_priority_app_strings(void);\n'
+    print("    ✅ susfs_parse_priority_app_strings déclaré dans susfs.h")
+if 'susfs_is_current_ksu_domain' not in sh:
+    sh += '\nextern bool susfs_is_current_ksu_domain(void);\n'
+    print("    ✅ susfs_is_current_ksu_domain déclaré dans susfs.h")
+# On ne touche PAS à susfs_set_priority_uid_filter s'il existe déjà
+if 'susfs_set_priority_uid_filter' not in sh:
+    sh += '\nextern void susfs_set_priority_uid_filter(u64 arg);\n'
+    print("    ✅ susfs_set_priority_uid_filter déclaré dans susfs.h")
+if 'susfs_is_sdcard_android_data_not_decrypted' not in sh:
     sh += '\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
+    print("    ✅ susfs_is_sdcard_android_data_not_decrypted déclaré dans susfs.h")
+else:
+    sh = sh.replace('extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted', 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted')
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
 PYEOF
 
@@ -359,7 +376,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V15.1 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V15.2 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
@@ -479,8 +496,8 @@ fi
 
 # ==================== 13. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v15.1-susfs-minimal"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v15.1-susfs-minimal"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v15.2-susfs-minimal"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v15.2-susfs-minimal"
 
 # ==================== 14. COMPILATION KSUD ====================
 echo ""
@@ -524,7 +541,7 @@ EOF
     if [ $? -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v15.1"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v15.2"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -545,7 +562,7 @@ gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable (Google Drive bloqué)."
-    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v15.1-susfs-minimal"
+    echo "⚠️ Ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v15.2-susfs-minimal"
     exit 0
 fi
 
@@ -576,11 +593,11 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v15.1-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v15.2-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
 # ==================== 16. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v15.1 (Workflow cyberc3dr corrigé) ==="
+echo "=== BUILD TERMINÉ v15.2 (Workflow cyberc3dr corrigé) ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
