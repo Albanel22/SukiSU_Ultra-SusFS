@@ -2,8 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V16.0 : V7.24 (working base) + SUSFS patch (all features disabled)
+# V16.0 : V7.24 (working base) + SUSFS patch VFS (toutes features OFF)
 #         Objectif : vérifier que le patch ne casse pas le boot à froid
+#         Correctif : téléchargement des 3 fichiers SUSFS manquants dans
+#                     le patch (fs/susfs.c, include/linux/susfs.h,
+#                     include/linux/susfs_def.h) AVANT les post-fix.
 # =============================================================================
 
 echo "=== Build V16.0 : V7.24 + SUSFS patch (inactive) ==="
@@ -32,43 +35,95 @@ git log --oneline -1
 echo "=== Intégration SukiSU-Ultra (builtin) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-[ ! -d "drivers/kernelsu" ] && echo "❌" && exit 1
+[ ! -d "drivers/kernelsu" ] && echo "❌ setup.sh SukiSU échoué" && exit 1
 echo "✅ intégré"
 
-# ==================== 2b. APPLICATION DU PATCH SUSFS (SEUL) ====================
+# ==================== 2b. APPLICATION DU PATCH SUSFS (VFS SEUL) ====================
 echo ""
-echo "=== Application du patch SUSFS (sans hooks additionnels) ==="
+echo "=== Application du patch SUSFS (VFS hooks uniquement) ==="
 
-# On cherche ton patch SUSFS à la racine du workspace
-SUSFS_PATCH=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name "*.patch" -o -name "susfs*.diff" 2>/dev/null | head -1)
+SUSFS_PATCH=$(find "$GITHUB_WORKSPACE" -maxdepth 1 \( -name "*.patch" -o -name "susfs*.diff" \) -print -quit 2>/dev/null)
 
 if [ -z "$SUSFS_PATCH" ]; then
     echo "❌ Aucun fichier de patch SUSFS trouvé à la racine."
-    echo "   Dépose ton fichier susfs.patch à la racine de ta branche."
     exit 1
 fi
 
 echo "✅ Patch trouvé : $SUSFS_PATCH"
 patch -p1 --forward < "$SUSFS_PATCH" || true
 
-# Check des rejets
 echo ""
 echo "--- Vérification des fichiers .rej ---"
-REJ_COUNT=$(find . -name "*.rej" 2>/dev/null | wc -l)
+REJ_FILES=$(find . -name "*.rej" 2>/dev/null || true)
+REJ_COUNT=$(printf '%s\n' "$REJ_FILES" | grep -c . || true)
 if [ "$REJ_COUNT" -gt 0 ]; then
-    echo "⚠️  $REJ_COUNT hunk(s) rejeté(s) :"
-    find . -name "*.rej" 2>/dev/null
-else
-    echo "✅ Aucun rejet"
+    echo "❌ $REJ_COUNT hunk(s) rejeté(s) — patch SUSFS non propre :"
+    printf '%s\n' "$REJ_FILES"
+    echo "   Corrige le patch avant de builder, sinon diagnostic invalide."
+    exit 1
 fi
+echo "✅ Aucun rejet"
 
-# ==================== 2c. CORRECTIFS POST-PATCH SUSFS (V7.24 style) ====================
+# ==================== 2b-bis. FICHIERS SUSFS MANQUANTS (FIX CRITIQUE) ====================
+echo ""
+echo "=== Récupération des 3 fichiers SUSFS (absents du patch VFS) ==="
+
+# Le patch fourni ne crée PAS fs/susfs.c, include/linux/susfs.h,
+# include/linux/susfs_def.h — il ne fait que modifier le VFS. Ces 3
+# fichiers doivent venir de susfs4ksu (même contenu que ce soit 4.19/5.x,
+# tout est gardé par #if LINUX_VERSION_CODE).
+download_susfs_file() {
+    local dest="$1"; shift
+    for url in "$@"; do
+        if curl -LSsf "$url" -o "$dest.tmp" 2>/dev/null; then
+            if [ -s "$dest.tmp" ] && ! head -1 "$dest.tmp" | grep -qi '<!DOCTYPE\|<html'; then
+                mv "$dest.tmp" "$dest"
+                return 0
+            fi
+        fi
+    done
+    rm -f "$dest.tmp"
+    return 1
+}
+
+BASE1="https://raw.githubusercontent.com/ShirkNeko/susfs4ksu/main/kernel_patches"
+BASE2="https://raw.githubusercontent.com/ShirkNeko/susfs4ksu/master/kernel_patches"
+BASE3="https://raw.githubusercontent.com/Simonpunk/susfs4ksu/master/kernel_patches"
+
+for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+    if [ -s "$f" ]; then
+        echo "  → $f (déjà présent)"
+        continue
+    fi
+    echo "  → $f (download)"
+    if ! download_susfs_file "$f" "$BASE1/$f" "$BASE2/$f" "$BASE3/$f"; then
+        echo "❌ Impossible de télécharger $f depuis une source connue."
+        echo "   Vérifie les URLs ou dépose le fichier manuellement à la racine."
+        exit 1
+    fi
+done
+
+# Vérification dure : les 3 fichiers existent et contiennent du code SUSFS
+for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+    if [ ! -s "$f" ]; then
+        echo "❌ $f absent ou vide → SUSFS incomplet"
+        exit 1
+    fi
+    if ! grep -q 'susfs' "$f" 2>/dev/null; then
+        echo "❌ $f ne ressemble pas à un fichier SUSFS :"
+        head -5 "$f"
+        exit 1
+    fi
+done
+echo "✅ 3 fichiers SUSFS présents et valides"
+
+# ==================== 2c. CORRECTIFS POST-PATCH SUSFS ====================
 echo ""
 echo "=== Correctifs post-patch SUSFS ==="
 
 # Ajouter fs/susfs.o dans fs/Makefile
 if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
-    echo "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" >> fs/Makefile
+    echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
     echo "    ✅ fs/Makefile : ligne susfs.o ajoutée"
 fi
 
@@ -98,7 +153,7 @@ for f in ['fs/stat.c', 'fs/open.c', 'fs/namespace.c', 'fs/super.c']:
     force_include(f, ['#include <linux/susfs.h>', '#include <linux/susfs_def.h>', '#include <linux/jump_label.h>'])
 PYEOF
 
-# Ajouter les macros manquantes (uniquement si absentes)
+# Ajouter les macros manquantes
 python3 - <<'PYEOF'
 with open('include/linux/susfs_def.h', 'r') as f: sd = f.read()
 if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER' not in sd:
@@ -110,7 +165,7 @@ if 'CL_COPY_MNT_NS' not in sd:
 with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
 PYEOF
 
-# Stubs manquants (uniquement si absents, sans toucher aux signatures existantes)
+# Stubs manquants
 python3 - <<'PYEOF'
 with open('fs/susfs.c', 'r') as f: sc = f.read()
 if 'susfs_parse_priority_app_strings' not in sc:
@@ -120,7 +175,8 @@ if 'susfs_is_current_ksu_domain' not in sc:
 if 'susfs_set_priority_uid_filter' not in sc:
     sc += '\nvoid susfs_set_priority_uid_filter(void __user **user_info) { }\n'
 if 'DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)' in sc:
-    sc = sc.replace('DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)', 'DEFINE_STATIC_KEY_TRUE(susfs_is_sdcard_android_data_not_decrypted)')
+    sc = sc.replace('DEFINE_STATIC_KEY_FALSE(susfs_is_sdcard_android_data_not_decrypted)',
+                    'DEFINE_STATIC_KEY_TRUE(susfs_is_sdcard_android_data_not_decrypted)')
 with open('fs/susfs.c', 'w') as f: f.write(sc)
 
 with open('include/linux/susfs.h', 'r') as f: sh = f.read()
@@ -133,7 +189,8 @@ if 'susfs_set_priority_uid_filter' not in sh:
 if 'susfs_is_sdcard_android_data_not_decrypted' not in sh:
     sh += '\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
 else:
-    sh = sh.replace('extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted', 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted')
+    sh = sh.replace('extern struct static_key_false susfs_is_sdcard_android_data_not_decrypted',
+                    'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted')
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
 PYEOF
 
@@ -143,7 +200,8 @@ echo "✅ Correctifs SUSFS appliqués"
 echo ""
 echo "=== Fixes compatibilité 4.19 (V7.24) ==="
 
-[ ! -f "include/linux/static_call.h" ] && cat > include/linux/static_call.h <<'EOF'
+if [ ! -f "include/linux/static_call.h" ]; then
+cat > include/linux/static_call.h <<'EOF'
 #ifndef _LINUX_STATIC_CALL_H
 #define _LINUX_STATIC_CALL_H
 #define static_call(name) (name##_static_call)
@@ -152,9 +210,12 @@ echo "=== Fixes compatibilité 4.19 (V7.24) ==="
 #define static_call_query(name) (name##_static_call)
 #endif
 EOF
+fi
 
 for f in drivers/kernelsu/ksu.c drivers/kernelsu/ksu_main.c drivers/kernelsu/core/init.c; do
-    [ -f "$f" ] && sed -i 's|MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);|#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)\nMODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n#endif|' "$f"
+    if [ -f "$f" ]; then
+        sed -i 's|MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);|#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)\nMODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n#endif|' "$f"
+    fi
 done
 
 for f in drivers/kernelsu/infra/file_wrapper.c drivers/kernelsu/file_wrapper.c; do
@@ -218,7 +279,8 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 done
 
-[ -f "drivers/kernelsu/supercall/dispatch.c" ] && python3 - drivers/kernelsu/supercall/dispatch.c <<'PYEOF'
+if [ -f "drivers/kernelsu/supercall/dispatch.c" ]; then
+    python3 - drivers/kernelsu/supercall/dispatch.c <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
 for inc in ['#include <linux/sched.h>', '#include <linux/sched/task.h>', '#include <linux/init_task.h>', '#include <linux/susfs.h>']:
@@ -227,24 +289,27 @@ for inc in ['#include <linux/sched.h>', '#include <linux/sched/task.h>', '#inclu
         if m: c = c[:m.end()] + inc + '\n' + c[m.end():]
 with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
+fi
 
 for f in drivers/kernelsu/policy/app_profile.c drivers/kernelsu/app_profile.c; do
     [ ! -f "$f" ] && continue
     sed -i 's|atomic_set(&current->seccomp.filter_count, 0);|#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)\n\tatomic_set(\&current->seccomp.filter_count, 0);\n#endif|' "$f"
 done
 
-[ -f "drivers/kernelsu/extension/cpu_spoof.c" ] && python3 - drivers/kernelsu/extension/cpu_spoof.c <<'PYEOF'
+if [ -f "drivers/kernelsu/extension/cpu_spoof.c" ]; then
+    python3 - drivers/kernelsu/extension/cpu_spoof.c <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
 c = c.replace('(*curr_cs_ptr)->vdso_clock_mode =', '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)\n                        (*curr_cs_ptr)->vdso_clock_mode =')
 c = re.sub(r'(#if LINUX_VERSION_CODE >= KERNEL_VERSION\(5,7,0\)\n\s*\(\*curr_cs_ptr\)->vdso_clock_mode\s*=\s*[^;]+;)', r'\1\n#endif', c)
 with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
+fi
 
 [ -f "drivers/kernelsu/sulog/event.c" ] && sed -i 's|#include <linux/minmax.h>|#include <linux/kernel.h>|' drivers/kernelsu/sulog/event.c
 [ -f "drivers/kernelsu/preinit/common/preinit.h" ] && sed -i 's|^#define KSU_NO_PREINIT$|#define KSU_NO_PREINIT 1|' drivers/kernelsu/preinit/common/preinit.h
 
-find drivers/kernelsu/sulog -name '*.c' -o -name '*.h' 2>/dev/null | while read f; do
+find drivers/kernelsu/sulog \( -name '*.c' -o -name '*.h' \) 2>/dev/null | while read f; do
     sed -i 's|#define USER_ARG_NULL user_arg_null_ptr()|#define USER_ARG_NULL (*user_arg_null_ptr())|' "$f"
 done
 
@@ -350,7 +415,7 @@ with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
 
-# ==================== 4. BACKPORT SELINUX 4.19 (V7.24) ====================
+# ==================== 4. BACKPORT SELINUX 4.19 ====================
 echo ""
 echo "=== Backport SELinux 4.19 ==="
 RULES="drivers/kernelsu/selinux/rules.c"
@@ -388,7 +453,7 @@ with open(path, 'w') as f: f.write(c)
 PYEOF
 fi
 
-# ==================== 5. INJECTION MANUAL HOOKS (V7.24, identique) ====================
+# ==================== 5. INJECTION MANUAL HOOKS (V7.24) ====================
 echo ""
 echo "=== Injection manual hooks V7.24 ==="
 
@@ -411,6 +476,7 @@ if 'ksu_handle_execveat' not in c:
     with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
+grep -q 'ksu_handle_execveat' "$EXEC_C" || { echo "❌ hook execveat non injecté dans $EXEC_C"; exit 1; }
 
 OPEN_C="fs/open.c"
 if grep -q 'SYSCALL_DEFINE3(faccessat' "$OPEN_C"; then
@@ -431,6 +497,7 @@ if 'ksu_handle_faccessat' not in c:
     with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
+grep -q 'ksu_handle_faccessat' "$OPEN_C" || { echo "❌ hook faccessat non injecté dans $OPEN_C"; exit 1; }
 
 STAT_C="fs/stat.c"
 if grep -q 'SYSCALL_DEFINE4(newfstatat' "$STAT_C"; then
@@ -451,8 +518,11 @@ if 'ksu_handle_stat' not in c:
     with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
 fi
+grep -q 'ksu_handle_stat' "$STAT_C" || { echo "❌ hook stat non injecté dans $STAT_C"; exit 1; }
 
-# ==================== 6. CONFIGURATION (SUSFS INACTIF - DIAGNOSTIC) ====================
+echo "✅ 3 hooks VFS injectés et vérifiés"
+
+# ==================== 6. CONFIGURATION (SUSFS INACTIF) ====================
 echo ""
 echo "=== Configuration : CONFIG_KSU_SUSFS=y MAIS toutes features désactivées ==="
 export ARCH=arm64; export SUBARCH=arm64
@@ -472,7 +542,7 @@ CONFIG_KSU_LSM_SECURITY_HOOKS=y
 CONFIG_KSU_FEATURE_SULOG=y
 CONFIG_KSU_FEATURE_ADBROOT=y
 
-# SUSFS : compilé mais INACTIF (toutes les features désactivées)
+# SUSFS : compilé mais INACTIF
 CONFIG_KSU_SUSFS=y
 # CONFIG_KSU_SUSFS_SUS_PATH is not set
 # CONFIG_KSU_SUSFS_SUS_MOUNT is not set
@@ -498,7 +568,7 @@ CONFIG_THREAD_INFO_IN_TASK=y
 EOF
 
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
-grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU"; exit 1; }
+grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ CONFIG_KSU=y manquant"; exit 1; }
 
 echo "=== État config SUSFS ==="
 grep -E "CONFIG_KSU_SUSFS" out/.config | head -15
@@ -510,20 +580,25 @@ printf "\n/* Patch Tactile */\n#include <linux/notifier.h>\n#include <linux/modu
 # ==================== 8. COMPILATION KERNEL ====================
 echo ""
 echo "=== Compilation kernel ==="
+# Désactive pipefail autour du tee pour capturer le vrai code retour de make
+set +eo pipefail
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   KCFLAGS="-Wno-macro-redefined -Wno-unused-variable -Wno-declaration-after-statement" \
   -j$(nproc) Image 2>&1 | tee build.log
+MAKE_RC=${PIPESTATUS[0]}
+set -eo pipefail
 
-if [ -f "out/arch/arm64/boot/Image" ]; then
-    echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
-    sha256sum out/arch/arm64/boot/Image | cut -d' ' -f1 > /tmp/kernel_compiled_hash.txt
-else
-    echo "❌ BUILD FAILED"
-    grep -iE "error:|undefined symbol|fatal error:" build.log | head -30
+if [ "$MAKE_RC" -ne 0 ] || [ ! -f "out/arch/arm64/boot/Image" ]; then
+    echo "❌ BUILD FAILED (make rc=$MAKE_RC)"
+    echo "--- Erreurs extraites de build.log ---"
+    grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
 
-# ==================== 9-11. KSUD + REPACK (identiques V7.24) ====================
+echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
+sha256sum out/arch/arm64/boot/Image | cut -d' ' -f1 > /tmp/kernel_compiled_hash.txt
+
+# ==================== 9-11. KSUD + REPACK ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
 cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v16.0-diagnostic"
 cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v16.0-diagnostic"
@@ -546,9 +621,9 @@ git clone --depth=1 --branch builtin https://github.com/ShirkNeko/SukiSU-Ultra.g
 KSUD_OK=0
 KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -name 'Cargo.toml' -type f 2>/dev/null | while read cargo; do
     if grep -qE 'name\s*=\s*"ksud"' "$cargo" 2>/dev/null; then dirname "$cargo"; break; fi
-done | head -1)
+done | head -1 || true)
 
-if [ -n "$KSUD_DIR" ]; then
+if [ -n "${KSUD_DIR:-}" ]; then
     cd "$KSUD_DIR"
     mkdir -p .cargo
     cat > .cargo/config.toml <<EOF
@@ -561,18 +636,19 @@ AR_aarch64_linux_android = "$AR_PATH"
 BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android = "$BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android"
 EOF
     export CARGO_NET_GIT_FETCH_WITH_CLI=true
-    set +e
+    set +eo pipefail
     cargo build --release --target aarch64-linux-android 2>&1 | tail -10
-    if [ $? -eq 0 ]; then
-        KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
-        if [ -n "$KSUD_BINARY" ]; then
+    CARGO_RC=${PIPESTATUS[0]}
+    set -eo pipefail
+    if [ "$CARGO_RC" -eq 0 ]; then
+        KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1 || true)
+        if [ -n "${KSUD_BINARY:-}" ]; then
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v16.0"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
         fi
     fi
-    set -e
 fi
 cd "$GITHUB_WORKSPACE"
 
@@ -582,8 +658,8 @@ gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img
 gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
-    echo "❌ boot-stock.img introuvable."
-    exit 0
+    echo "❌ boot-stock.img introuvable ou trop petit (< 50 Mo)."
+    exit 1
 fi
 
 mkdir -p repack
