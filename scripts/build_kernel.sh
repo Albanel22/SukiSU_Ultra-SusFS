@@ -2,12 +2,13 @@
 set -euo pipefail
 
 # =============================================================================
-# V11.3 : SukiSU-Ultra (builtin) + SUSFS v2.3.0 (Patch fourni) + Manual Hooks
-#         Base V11.2 (boot + root + termux OK) + injection ksu_handle_*
-#         Objectif : manager SukiSU fonctionnel (communication kernel/userspace)
+# V11.4 : SukiSU-Ultra (builtin) + SUSFS v2.3.0 (Patch fourni) + Manual Hooks
+#         Base V11.3 (ident. V11.2 + §4b manual hooks)
+#         Mini-patch config : ENABLE_LOG syntaxe Kconfig + désactivations
+#                             complètes + vérifications durcies
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra + SUSFS v2.3.0 + Manual Hooks — V11.3 ==="
+echo "=== Build SukiSU-Ultra + SUSFS v2.3.0 + Manual Hooks — V11.4 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -40,7 +41,6 @@ echo "✅ SukiSU-Ultra (builtin) intégré"
 echo ""
 echo "=== Application du patch SUSFS v2.3.0 ==="
 
-# Find groupé : parenthèses obligatoires sinon -maxdepth 1 ne s'applique pas au 2ᵉ motif
 SUSFS_PATCH=$(find "$GITHUB_WORKSPACE" -maxdepth 1 \( -name "*.patch" -o -name "susfs*.diff" \) -print -quit 2>/dev/null)
 
 if [ -z "$SUSFS_PATCH" ]; then
@@ -51,7 +51,6 @@ fi
 echo "✅ Fichier de patch trouvé : $SUSFS_PATCH"
 patch -p1 --forward < "$SUSFS_PATCH" || true
 
-# .rej : warning seulement (V11.2 a booté avec ce même patch appliqué ainsi)
 REJ_COUNT=$(find . -name "*.rej" 2>/dev/null | wc -l)
 if [ "$REJ_COUNT" -gt 0 ]; then
     echo "⚠️  $REJ_COUNT hunk(s) rejeté(s) (V11.2 a booté malgré ça) :"
@@ -67,19 +66,37 @@ if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
     echo "    ✅ fs/Makefile : ligne susfs.o ajoutée"
 fi
 
+# Force super.c — V11.4 : print ✅ UNIQUEMENT si le replace a réellement matché
 python3 - <<'PYEOF'
 import os
 def force_super_c():
     with open('fs/super.c', 'r') as f:
         c = f.read()
+    changed = False
     if '#include <linux/susfs_def.h>' not in c:
-        c = c.replace('#include <linux/user_namespace.h>', '#include <linux/user_namespace.h>\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n#include <linux/jump_label.h>\n#endif')
-        print("    ✅ fs/super.c : includes SUSFS ajoutés")
+        marker = '#include <linux/user_namespace.h>'
+        if marker in c:
+            c = c.replace(marker, marker + '\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n#include <linux/jump_label.h>\n#endif', 1)
+            changed = True
+            print("    ✅ fs/super.c : includes SUSFS ajoutés")
+        else:
+            print("    ⚠️  fs/super.c : marqueur 'user_namespace.h' introuvable — includes NON ajoutés")
+    else:
+        print("    → fs/super.c : includes déjà présents")
+
     if 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted' not in c:
-        c = c.replace('#include "internal.h"', '#include "internal.h"\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#endif')
-        print("    ✅ fs/super.c : déclarations externes ajoutées")
-    with open('fs/super.c', 'w') as f:
-        f.write(c)
+        marker = '#include "internal.h"'
+        if marker in c:
+            c = c.replace(marker, marker + '\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#endif', 1)
+            changed = True
+            print("    ✅ fs/super.c : externs ajoutés")
+        else:
+            print("    ⚠️  fs/super.c : marqueur 'internal.h' introuvable — externs NON ajoutés")
+
+    if changed:
+        with open('fs/super.c', 'w') as f:
+            f.write(c)
+
 force_super_c()
 PYEOF
 
@@ -150,6 +167,8 @@ extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
         print("    ✅ fs/namespace.c : externs + CL_COPY_MNT_NS ajoutés")
     else:
         print("    ⚠️  fs/namespace.c : marqueur 'internal.h' introuvable")
+else:
+    print("    → fs/namespace.c : externs déjà présents")
 with open('fs/namespace.c', 'w') as f: f.write(c)
 PYEOF
 
@@ -195,13 +214,20 @@ echo "=== Exécution de susfs_inline_hook_patches.sh ==="
 
 curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o /tmp/susfs_inline_hook_patches.sh
 chmod +x /tmp/susfs_inline_hook_patches.sh
-bash /tmp/susfs_inline_hook_patches.sh
+# V11.4 : on log le code retour mais on ne sort pas — V11.2 a booté malgré un
+# succès incertain de ce script. Utile juste pour la traçabilité.
+if bash /tmp/susfs_inline_hook_patches.sh; then
+    echo "✅ susfs_inline_hook_patches.sh OK (rc=0)"
+else
+    INLINE_RC=$?
+    echo "⚠️  susfs_inline_hook_patches.sh a retourné rc=$INLINE_RC — SUSFS peut être partiellement appliqué"
+    echo "    On continue quand même (V11.2 a booté avec le même script)."
+fi
 
-# ==================== 4b. MANUAL HOOKS KERNELSU (V7.24) ← NOUVEAU ====================
-# ⚠️  C'est CE bloc qui rend le manager fonctionnel.
-#     - ksu_handle_execveat  : identifie le manager au lancement (supercall entrance)
-#     - ksu_handle_faccessat : détection d'accès fichier par le manager
-#     - ksu_handle_stat      : profil / détection process
+# ==================== 4b. MANUAL HOOKS KERNELSU (V7.24) ← CORRECTION CLÉ ====================
+# - ksu_handle_execveat  : identifie le manager au lancement (supercall entrance)
+# - ksu_handle_faccessat : détection d'accès fichier par le manager
+# - ksu_handle_stat      : profil / détection process
 # Sans ces 3 hooks, termux marche (grâce au binaire su setuid) mais le manager
 # ne reçoit jamais de réponse du noyau → "communication impossible".
 echo ""
@@ -520,6 +546,9 @@ cat >> out/.config <<'EOF'
 CONFIG_KSU=y
 CONFIG_KSU_MANUAL_HOOK=y
 # CONFIG_KSU_KPROBES is not set
+# CONFIG_KSU_KPROBES_KSUD is not set
+# CONFIG_KSU_TRACEPOINT_HOOK is not set
+# CONFIG_KSU_HACK_ARM64_BRANCH_LINK is not set
 # CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set
 CONFIG_KSU_LSM_SECURITY_HOOKS=y
 CONFIG_KSU_FEATURE_SULOG=y
@@ -531,7 +560,7 @@ CONFIG_KSU_SUSFS_SUS_PATH=y
 CONFIG_KSU_SUSFS_SUS_MOUNT=y
 CONFIG_KSU_SUSFS_SUS_KSTAT=y
 CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-CONFIG_KSU_SUSFS_ENABLE_LOG=n
+# CONFIG_KSU_SUSFS_ENABLE_LOG is not set
 CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
@@ -551,7 +580,7 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ CONFIG_KSU=y manquant"; exit 1; }
 
 echo "=== État config SUSFS ==="
-grep -E "CONFIG_KSU_SUSFS|CONFIG_KSU=y|CONFIG_KSU_MANUAL_HOOK=y" out/.config | head -15
+grep -E "CONFIG_KSU_SUSFS|CONFIG_KSU=y|CONFIG_KSU_MANUAL_HOOK=y|CONFIG_KSU_KPROBES|CONFIG_KSU_TRACEPOINT" out/.config | head -20
 
 # ==================== 8. PATCHS MOTOROLA ====================
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
@@ -560,7 +589,6 @@ printf "\n/* Patch Tactile */\n#include <linux/notifier.h>\n#include <linux/modu
 # ==================== 9. COMPILATION KERNEL ====================
 echo ""
 echo "=== Compilation kernel ==="
-# Désactive pipefail localement pour capturer le VRAI rc de make (pas celui de tee)
 set +eo pipefail
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   KCFLAGS="-Wno-macro-redefined -Wno-unused-variable -Wno-declaration-after-statement" \
@@ -582,8 +610,8 @@ sha256sum out/arch/arm64/boot/Image | cut -d' ' -f1 > /tmp/kernel_compiled_hash.
 
 # ==================== 10. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v11.3-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v11.3-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v11.4-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v11.4-susfs"
 echo "✅ Image + System.map sauvegardés dans $GITHUB_WORKSPACE/output/"
 
 # ==================== 11. COMPILATION KSUD ====================
@@ -629,7 +657,7 @@ EOF
     if [ "$CARGO_RC" -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1 || true)
         if [ -n "${KSUD_BINARY:-}" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v11.3"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v11.4"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -649,8 +677,7 @@ gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable (Google Drive bloqué ou ID invalide)."
-    echo "⚠️  Le noyau est DISPONIBLE dans : $GITHUB_WORKSPACE/output/Image-v11.3-susfs"
-    echo "    Tu peux repacker manuellement avec magiskboot si besoin."
+    echo "⚠️  Le noyau est DISPONIBLE dans : $GITHUB_WORKSPACE/output/Image-v11.4-susfs"
     exit 1
 fi
 
@@ -679,11 +706,11 @@ if [ "${KSUD_OK:-0}" = "1" ] && [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v11.3-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v11.4-boot.img"
 cd "$GITHUB_WORKSPACE"
 set -e
 
 # ==================== 13. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v11.3 ==="
+echo "=== BUILD TERMINÉ v11.4 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
