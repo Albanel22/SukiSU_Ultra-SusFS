@@ -2,11 +2,13 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.33 : SukiSU-Ultra builtin + SUSFS v2.3.0
-#         + injection automatique des hunks rejetés de fs/namespace.c
+# V7.34 : SukiSU-Ultra builtin + SUSFS v2.3.0
+#         - builtin conservé (branche actuelle SukiSU-Ultra)
+#         - CONFIG_KSU_MANUAL_HOOK supprimé (option obsolète)
+#         - injection manuelle des hunks rejetés de fs/namespace.c
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.33 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.34 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -58,8 +60,6 @@ curl -LSsf "$BASE_JACK/Patch/susfs_patch_to_4.19.patch" -o "$SUSFS_PATCH" \
   || { echo "❌ download patch SUSFS échoué"; exit 1; }
 [ -s "$SUSFS_PATCH" ] || { echo "❌ patch SUSFS vide"; exit 1; }
 
-# On tente le patch, mais on ne s'arrête PAS en cas d'échec.
-# On applique les rejets manuellement ensuite.
 if patch -p1 --forward --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; then
     echo "  → Application du patch SUSFS…"
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 \
@@ -69,7 +69,6 @@ else
     echo "  ⚠️ Patch SUSFS partiellement rejeté — application puis correction manuelle"
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 || true
 
-    # --- Injection manuelle des blocs rejetés dans fs/namespace.c
     echo "  → Injection des hunks rejetés dans fs/namespace.c…"
     python3 - <<'PYEOF'
 import re, sys
@@ -78,12 +77,10 @@ path = 'fs/namespace.c'
 with open(path) as f:
     c = f.read()
 
-# Vérifie si déjà injecté (idempotent)
 if 'susfs_is_current_ksu_domain' in c:
     print("  ↻ fs/namespace.c : blocs SUSFS déjà présents, skip")
     sys.exit(0)
 
-# --- Bloc 1 : includes et déclarations après "internal.h"
 anchor1 = '#include "internal.h"\n'
 if anchor1 not in c:
     print(f"  ❌ anchor1 introuvable : {anchor1!r}")
@@ -103,12 +100,8 @@ extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
 '''
-# Insère juste après #include "internal.h"
 c = c.replace(anchor1, anchor1 + bloc1, 1)
 
-# --- Bloc 2 : hook dans vfs_kern_mount
-# Cherche la fonction vfs_kern_mount et le début de son corps
-# On cible la ligne "if (!type)" dans vfs_kern_mount
 pattern = r'(struct vfsmount \*vfs_kern_mount\([^)]*\)\s*\{.*?if \(!type\)\s*\n\s*return ERR_PTR\(-EINVAL\);\s*\n)'
 match = re.search(pattern, c, re.DOTALL)
 if not match:
@@ -128,11 +121,8 @@ bloc2 = '''
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
 '''
-# Insère après le bloc "if (!type) return ..."
 c = c[:match.end()] + bloc2 + c[match.end():]
 
-# Ajoute le label "bypass_orig_flow:" juste avant "if (!mnt)"
-# On cherche la ligne "mnt = alloc_vfsmnt(name);" qui suit
 pattern2 = r'(mnt = alloc_vfsmnt\(name\);\s*\n)'
 match2 = re.search(pattern2, c)
 if not match2:
@@ -151,7 +141,6 @@ with open(path, 'w') as f:
 print("  ✅ fs/namespace.c : blocs SUSFS injectés manuellement")
 PYEOF
 
-    # Vérifie que l'injection a réussi
     if ! grep -q "susfs_is_current_ksu_domain" fs/namespace.c; then
         echo "❌ L'injection manuelle dans fs/namespace.c a échoué"
         exit 1
@@ -159,23 +148,20 @@ PYEOF
     echo "  ✅ fs/namespace.c corrigé"
 fi
 
-# Nettoyage des .rej
 find . -name "*.rej" -delete 2>/dev/null || true
 
-# Vérification fichiers SUSFS
 for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
     [ -s "$f" ] || { echo "❌ $f manquant après patch"; exit 1; }
 done
 echo "  ✅ fichiers SUSFS présents"
 
-# susfs.o dans fs/Makefile
 if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
     echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
     echo "  ✅ susfs.o ajouté à fs/Makefile"
 fi
 
 # -----------------------------------------------------------------------------
-# 3. Hooks inline — susfs_inline_hook_patches.sh
+# 3. Hooks inline
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Hooks inline (susfs_inline_hook_patches.sh) ==="
@@ -204,8 +190,6 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 cat >> out/.config <<'EOF'
 CONFIG_KSU=y
-CONFIG_KSU_MANUAL_HOOK=y
-# CONFIG_KSU_KPROBES is not set
 CONFIG_KSU_LSM_SECURITY_HOOKS=y
 CONFIG_KSU_FEATURE_SULOG=y
 CONFIG_KSU_FEATURE_ADBROOT=y
@@ -232,8 +216,8 @@ EOF
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   olddefconfig 2>&1 | tail -3
 
-# Vérif config critique
-for opt in CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KSU_SUSFS \
+# Vérif config critique (sans MANUAL_HOOK qui n'existe plus)
+for opt in CONFIG_KSU CONFIG_KSU_SUSFS \
            CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_KSTAT; do
     grep -q "^${opt}=y" out/.config || { echo "❌ ${opt} droppé"; exit 1; }
 done
@@ -265,14 +249,14 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.33) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.34) ✅✅✅"
 
 # -----------------------------------------------------------------------------
 # 7. Sauvegarde
 # -----------------------------------------------------------------------------
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.33-susfs"
-[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.33-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.34-susfs"
+[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.34-susfs"
 
 # -----------------------------------------------------------------------------
 # 8. Repack
@@ -301,7 +285,7 @@ cd repack
 ./magiskboot unpack boot.img
 cp "$GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image" kernel
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.33-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.34-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 
@@ -309,5 +293,5 @@ echo "✅ boot.img repacké"
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.33 ==="
+echo "=== BUILD TERMINÉ v7.34 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
