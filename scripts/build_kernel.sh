@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.26 : SukiSU-Ultra builtin — V7.24 (Manager OK) + SUSFS v2.3.0 (Partiel)
+# V7.28 : SukiSU-Ultra builtin — V7.24 (Manager OK) + SUSFS v2.3.0 (Partiel)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.26 (SUSFS Partiel) ==="
+echo "=== Build SukiSU-Ultra builtin — V7.28 (SUSFS Partiel) ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -56,29 +56,39 @@ echo ""
 echo "=== Application de susfs_patch_to_4.19.patch ==="
 patch -p1 -t --forward < /tmp/susfs_4.19.patch || true
 
-# ==================== 2c. FICHIERS SUSFS (SECOURS) ====================
+# ==================== 2c. EXTRACTION DES FICHIERS SUSFS v2.3.0 (DEPUIS LE PATCH) ====================
 echo ""
-echo "=== Vérification / Récupération des 3 fichiers SUSFS ==="
-BASE_GITLAB="https://gitlab.com/simonpunk/susfs4ksu/-/raw/master/kernel_patches"
-BASE_GITHUB="https://raw.githubusercontent.com/Star-Seven/susfs4ksu/master/kernel_patches"
+echo "=== Extraction des fichiers SUSFS v2.3.0 depuis le patch ==="
+# On extrait directement les fichiers du patch pour éviter le décalage de version
+python3 - <<'PYEOF'
+import re
 
-download_susfs() {
-    local dest="$1"
-    local path="$2"
-    if [ -s "$dest" ]; then
-        echo "  → $dest (déjà présent)"
-        return 0
-    fi
-    echo "  → Téléchargement de secours de $dest..."
-    if curl -LSsf "$BASE_GITLAB/$path" -o "$dest" 2>/dev/null; then return 0; fi
-    if curl -LSsf "$BASE_GITHUB/$path" -o "$dest" 2>/dev/null; then return 0; fi
-    echo "❌ Impossible de télécharger $path"
-    exit 1
-}
+with open('/tmp/susfs_4.19.patch', 'r') as f:
+    patch_content = f.read()
 
-download_susfs "fs/susfs.c" "fs/susfs.c"
-download_susfs "include/linux/susfs.h" "include/linux/susfs.h"
-download_susfs "include/linux/susfs_def.h" "include/linux/susfs_def.h"
+files_to_extract = ['fs/susfs.c', 'include/linux/susfs.h', 'include/linux/susfs_def.h']
+for fpath in files_to_extract:
+    pattern = re.compile(rf'diff --git a/{re.escape(fpath)} b/{re.escape(fpath)}\n.*?--- /dev/null\n\+\+\+ b/{re.escape(fpath)}\n@@[^\n]*\n(.*?)(?=\ndiff --git|\Z)', re.DOTALL)
+    match = pattern.search(patch_content)
+    if match:
+        lines = match.group(1).split('\n')
+        file_content = []
+        for line in lines:
+            if line.startswith('+'):
+                file_content.append(line[1:])
+            elif line.startswith(' '):
+                file_content.append(line[1:])
+            elif line.startswith('@@'):
+                pass
+        with open(fpath, 'w') as out:
+            out.write('\n'.join(file_content) + '\n')
+        print(f"  ✅ {fpath} extrait (v2.3.0)")
+    else:
+        print(f"  ⚠️ Impossible d'extraire {fpath} du patch")
+PYEOF
+
+# On vérifie que les fichiers sont bien là et qu'ils sont en v2.3.0
+grep -q 'SUSFS_VERSION "v2.3.0"' include/linux/susfs.h && echo "✅ Version v2.3.0 confirmée" || (echo "❌ Mauvaise version de SUSFS"; exit 1)
 
 # ==================== 2d. CORRECTIFS POST-PATCH SUSFS ====================
 echo ""
@@ -150,22 +160,18 @@ if 'susfs_set_priority_uid_filter' not in sh:
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
 PYEOF
 
-# ==================== FIX CRITIQUE POUR SUS_KSTAT SANS SUS_MOUNT ====================
-echo "    → Correction de fs/notify/fdinfo.c (incompatibilité signature)..."
+# ==================== FIX CRITIQUE : SUS_KSTAT SANS SUS_MOUNT ====================
+echo "    → Correction de fs/notify/fdinfo.c (incompatibilité signature/appel)..."
 python3 - <<'PYEOF'
-import re
 with open('fs/notify/fdinfo.c', 'r') as f: c = f.read()
 
-# Corriger la condition de show_fdinfo : 3 args uniquement si SUS_MOUNT est actif
-c = re.sub(
-    r'#if defined\(CONFIG_KSU_SUSFS_SUS_MOUNT\) \|\| defined\(CONFIG_KSU_SUSFS_SUS_KSTAT\)\s*\n'
-    r'static void show_fdinfo\(struct seq_file \*m, struct file \*f,\s*\n'
-    r'\s*void \(\*show\)\(struct seq_file \*m,\s*\n'
-    r'\s*struct fsnotify_mark \*mark,\s*\n'
-    r'\s*struct file \*file\)\)\s*\n'
-    r'#else',
-    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nstatic void show_fdinfo(struct seq_file *m, struct file *f,\n\t\t\tvoid (*show)(struct seq_file *m,\n\t\t\t\t     struct fsnotify_mark *mark,\n\t\t\t\t\t struct file *file))\n#else',
-    c
+c = c.replace(
+    '#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_SUS_KSTAT)',
+    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT'
+)
+c = c.replace(
+    '#endif // #if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_SUS_KSTAT)',
+    '#endif // CONFIG_KSU_SUSFS_SUS_MOUNT'
 )
 with open('fs/notify/fdinfo.c', 'w') as f: f.write(c)
 print("    ✅ fs/notify/fdinfo.c corrigé.")
@@ -544,12 +550,12 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f "out/arch/arm64/boot/Image" ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.26) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.28) ✅✅✅"
 
 # ==================== 9. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.26-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.26-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.28-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.28-susfs"
 
 # ==================== 10. COMPILATION KSUD ====================
 echo ""
@@ -595,7 +601,7 @@ EOF
     if [ "$CARGO_RC" -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v7.26"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v7.28"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -615,7 +621,7 @@ gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable (Google Drive bloqué)."
-    echo "⚠️ On saute le repack, mais ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v7.26-susfs"
+    echo "⚠️ On saute le repack, mais ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v7.28-susfs"
     exit 0
 fi
 
@@ -646,12 +652,12 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.26-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.28-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké avec succès"
 set -e
 
 # ==================== 12. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v7.26 ==="
+echo "=== BUILD TERMINÉ v7.28 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
