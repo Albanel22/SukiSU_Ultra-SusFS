@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.39 : SukiSU-Ultra builtin + SUSFS v2.3.0
+# V7.40 : SukiSU-Ultra builtin + SUSFS v2.3.0
 #         - Correctif manager detection (ksu_install_fd O_CLOEXEC → 0)
-#         - Compilation ksud robuste (libclang-dev + erreurs visibles)
+#         - Téléchargement ksud officiel (release ou APK) + injection ramdisk
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.39 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.40 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -21,7 +21,7 @@ sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.l
 sudo apt-get update
 sudo apt-get install -y bc bison build-essential flex libelf-dev libssl-dev \
   libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld \
-  device-tree-compiler zip unzip curl git python3 python3-pip cpio patch wget libclang-dev
+  device-tree-compiler zip unzip curl git python3 python3-pip cpio patch wget
 
 pip3 install --quiet gdown
 cd "$GITHUB_WORKSPACE"
@@ -67,7 +67,6 @@ if 'MSG123' in c:
     print("  ↻ supercall.c : déjà patché, skip")
     sys.exit(0)
 
-# Cible l'appel dans ksu_install_fd()
 c2, n1 = re.subn(
     r'(int\s+ksu_install_fd\s*\(\s*void\s*\)\s*\{[^}]*?)return\s+ksu_install_fd_with_permissions\s*\(\s*O_CLOEXEC\s*,\s*0\s*\)',
     r'\1return ksu_install_fd_with_permissions(0, 0); /* MSG123: manager detection fix */',
@@ -393,7 +392,6 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 echo "  → Vérification CONFIG_KSU dans .config final…"
 if ! grep -q '^CONFIG_KSU=y' out/.config; then
     echo "❌ CONFIG_KSU n'est pas 'y' dans out/.config !"
-    echo "   Lignes CONFIG_KSU trouvées :"
     grep 'CONFIG_KSU' out/.config || echo "   (aucune)"
     exit 1
 fi
@@ -430,7 +428,7 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.39) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.40) ✅✅✅"
 
 # -----------------------------------------------------------------------------
 # 6b. VÉRIFICATION STRICTE DES SYMBOLES KSU DANS LE NOYAU
@@ -453,73 +451,58 @@ echo "$KSU_SYMS" | head -10
 # 7. Sauvegarde
 # -----------------------------------------------------------------------------
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.39-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.39-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.40-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.40-susfs"
 
 # -----------------------------------------------------------------------------
-# 7b. Compilation ksud (avec affichage des erreurs)
+# 7b. Récupération de ksud (release officielle ou APK)
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== Compilation ksud ==="
+echo "=== Récupération de ksud ==="
 cd "$GITHUB_WORKSPACE"
 
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly 2>&1 | tail -3 || true
-source "$HOME/.cargo/env" || true
-[ -x "$HOME/.cargo/bin/cargo" ] || { echo "❌ cargo absent"; exit 1; }
+# 1. Tentative depuis les assets de la release (ksud-aarch64-linux-android)
+KSUD_URL=$(curl -s https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/latest \
+    | grep "browser_download_url" \
+    | grep -i "ksud" \
+    | grep -i "aarch64" \
+    | cut -d '"' -f 4 \
+    | head -1)
 
-rustc --version
-rustup update nightly 2>&1 | tail -3 || true
-rustup target add aarch64-linux-android 2>&1 | tail -2 || true
+if [ -n "$KSUD_URL" ] && wget -q "$KSUD_URL" -O "$GITHUB_WORKSPACE/ksud"; then
+    chmod 755 "$GITHUB_WORKSPACE/ksud"
+    KSUD_OK=1
+    echo "✅ ksud téléchargé depuis la release : $KSUD_URL"
+else
+    echo "⚠️ Pas d'asset ksud dans la release. Tentative d'extraction depuis l'APK…"
+    APK_URL=$(curl -s https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/latest \
+        | grep "browser_download_url" \
+        | grep "\.apk" \
+        | grep -v "spoofed" \
+        | cut -d '"' -f 4 \
+        | head -1)
 
-wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip || true
-unzip -q android-ndk-r26d-linux.zip || true
-export ANDROID_NDK_ROOT="$GITHUB_WORKSPACE/android-ndk-r26d"
-export AARCH64_CLANG_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
-export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
-export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-
-rm -rf "$GITHUB_WORKSPACE/ksud-src"
-git clone --depth=1 --branch builtin https://github.com/ShirkNeko/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
-
-KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -name 'Cargo.toml' -type f 2>/dev/null | while read cargo; do
-    if grep -qE 'name\s*=\s*"ksud"' "$cargo" 2>/dev/null; then dirname "$cargo"; break; fi
-done | head -1)
-
-if [ -z "$KSUD_DIR" ]; then
-    echo "❌ Cargo.toml de ksud introuvable"
-    exit 1
+    if [ -n "$APK_URL" ]; then
+        wget -q "$APK_URL" -O /tmp/manager.apk
+        unzip -q /tmp/manager.apk "lib/arm64-v8a/libksud.so" -d /tmp/ksud-extract 2>/dev/null || true
+        if [ -f /tmp/ksud-extract/lib/arm64-v8a/libksud.so ]; then
+            cp /tmp/ksud-extract/lib/arm64-v8a/libksud.so "$GITHUB_WORKSPACE/ksud"
+            chmod 755 "$GITHUB_WORKSPACE/ksud"
+            KSUD_OK=1
+            echo "✅ ksud extrait depuis l'APK du manager"
+        else
+            echo "❌ libksud.so introuvable dans l'APK"
+            KSUD_OK=0
+        fi
+    else
+        echo "❌ Impossible de trouver l'APK du manager"
+        KSUD_OK=0
+    fi
 fi
 
-(
-    cd "$KSUD_DIR"
-    mkdir -p .cargo
-    cat > .cargo/config.toml <<EOF
-[target.aarch64-linux-android]
-linker = "$AARCH64_CLANG_PATH"
-[env]
-CC_aarch64_linux_android = "$AARCH64_CLANG_PATH"
-CXX_aarch64_linux_android = "$AARCH64_CLANGXX_PATH"
-AR_aarch64_linux_android = "$AR_PATH"
-BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android = "--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
-EOF
-    export CARGO_NET_GIT_FETCH_WITH_CLI=true
-    echo "→ cargo build (affichage complet des erreurs)…"
-    cargo build --release --target aarch64-linux-android 2>&1 | tail -40
-) || {
-    echo "❌ cargo build a échoué — voir les erreurs ci-dessus"
-    exit 1
-}
-
-KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
-if [ -z "$KSUD_BINARY" ]; then
-    echo "❌ ksud introuvable après cargo build"
-    exit 1
+if [ "${KSUD_OK:-0}" != "1" ]; then
+    echo "⚠️ ksud non disponible — le manager ne détectera probablement pas le noyau"
 fi
-
-cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
-chmod 755 "$GITHUB_WORKSPACE/ksud"
-KSUD_OK=1
-echo "✅ ksud compilé"
 
 cd "$GITHUB_WORKSPACE"
 
@@ -566,7 +549,7 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.39-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.40-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 
@@ -574,5 +557,5 @@ echo "✅ boot.img repacké"
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.39 ==="
+echo "=== BUILD TERMINÉ v7.40 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
