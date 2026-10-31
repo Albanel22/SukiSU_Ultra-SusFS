@@ -3,9 +3,10 @@ set -euo pipefail
 
 # =============================================================================
 # V7.28 : SukiSU-Ultra builtin — V7.24 + SUSFS v2.3.0 (Partiel & Stable)
+# V7.28.1 : Correctif kernel_compat.h (infra/) + diagnostic patches
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.28 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.28.1 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -48,28 +49,44 @@ if [ ! -s /tmp/sukisu_fixed.patch ] || [ ! -s /tmp/susfs_4.19.patch ]; then
 fi
 echo "✅ Patches téléchargés."
 
-# --- CORRECTION ICI : On se place dans drivers/kernelsu pour appliquer le patch SukiSU ---
+# --- Application du patch SukiSU (diagnostic amélioré) ---
 echo ""
 echo "=== Application de sukisu_ultra_fixed.patch (dans drivers/kernelsu) ==="
+echo "  → Aperçu des chemins du patch :"
+head -3 /tmp/sukisu_fixed.patch | sed 's/^/     /'
 cd drivers/kernelsu
-patch -p1 -t --forward < /tmp/sukisu_fixed.patch || true
+set +e
+patch -p1 -t --forward < /tmp/sukisu_fixed.patch
+SUKISU_PATCH_RC=$?
+set -e
+if [ "$SUKISU_PATCH_RC" -ne 0 ]; then
+    echo "⚠️  sukisu_ultra_fixed.patch : hunks en échec (rc=$SUKISU_PATCH_RC)"
+    ls -la *.rej 2>/dev/null | head -10 || true
+else
+    echo "  ✅ patch SukiSU appliqué"
+fi
 cd ../..
 
 echo ""
 echo "=== Application de susfs_patch_to_4.19.patch (dans la racine) ==="
-patch -p1 -t --forward < /tmp/susfs_4.19.patch || true
+set +e
+patch -p1 -t --forward < /tmp/susfs_4.19.patch
+SUSFS_PATCH_RC=$?
+set -e
+if [ "$SUSFS_PATCH_RC" -ne 0 ]; then
+    echo "⚠️  susfs_patch_to_4.19.patch : hunks en échec (rc=$SUSFS_PATCH_RC)"
+    find . -maxdepth 3 -name '*.rej' 2>/dev/null | head -10 || true
+fi
 
 # ==================== 2c. EXTRACTION DES FICHIERS SUSFS v2.3.0 ====================
 echo ""
 echo "=== Extraction des fichiers SUSFS v2.3.0 depuis le patch ==="
-# Le patch contient les nouveaux fichiers, on les extrait proprement
 python3 - <<'PYEOF'
 import re
 
 with open('/tmp/susfs_4.19.patch', 'r') as f:
     patch_content = f.read()
 
-# Regex pour trouver les nouveaux fichiers
 patterns = {
     'fs/susfs.c': r'diff --git a/fs/susfs\.c b/fs/susfs\.c.*?\n--- /dev/null\n\+\+\+ b/fs/susfs\.c\n@@ .*? @@\n(.*?)(?=\ndiff --git|\Z)',
     'include/linux/susfs.h': r'diff --git a/include/linux/susfs\.h b/include/linux/susfs\.h.*?\n--- /dev/null\n\+\+\+ b/include/linux/susfs\.h\n@@ .*? @@\n(.*?)(?=\ndiff --git|\Z)',
@@ -80,7 +97,6 @@ import os
 for filepath, pattern in patterns.items():
     match = re.search(pattern, patch_content, re.DOTALL)
     if match:
-        # Nettoyer les lignes du diff (enlever le + au début)
         content = match.group(1)
         lines = content.split('\n')
         cleaned = []
@@ -90,7 +106,7 @@ for filepath, pattern in patterns.items():
             elif line.startswith(' '):
                 cleaned.append(line[1:])
             elif line.startswith('-'):
-                continue # Ne devrait pas arriver pour un nouveau fichier
+                continue
             else:
                 cleaned.append(line)
         
@@ -103,7 +119,6 @@ for filepath, pattern in patterns.items():
         exit(1)
 PYEOF
 
-# Vérification dure
 for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
     if [ ! -s "$f" ]; then
         echo "❌ $f manquant après extraction."
@@ -121,7 +136,6 @@ if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
     echo "    ✅ fs/Makefile patché"
 fi
 
-# Includes forcés (Répare les échecs de Hunk #1 dans fs/namespace.c et fs/super.c)
 python3 - <<'PYEOF'
 import os
 def force_include(filepath, includes):
@@ -145,7 +159,6 @@ for f in ['fs/stat.c', 'fs/open.c', 'fs/namespace.c', 'fs/super.c']:
     force_include(f, ['#include <linux/susfs.h>', '#include <linux/susfs_def.h>', '#include <linux/jump_label.h>'])
 PYEOF
 
-# Fix macros et variables manquantes
 python3 - <<'PYEOF'
 with open('include/linux/susfs_def.h', 'r') as f: sd = f.read()
 if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER' not in sd:
@@ -159,7 +172,6 @@ if 'susfs_is_sdcard_android_data_not_decrypted' not in sd:
 with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
 PYEOF
 
-# Fix stubs et variables dans susfs.c et susfs.h
 python3 - <<'PYEOF'
 with open('fs/susfs.c', 'r') as f: sc = f.read()
 if 'susfs_parse_priority_app_strings' not in sc:
@@ -182,7 +194,6 @@ if 'susfs_set_priority_uid_filter' not in sh:
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
 PYEOF
 
-# Correction fs/notify/fdinfo.c (cohérence des arguments si SUS_MOUNT est off)
 echo "    → Correction de fs/notify/fdinfo.c..."
 python3 - <<'PYEOF'
 with open('fs/notify/fdinfo.c', 'r') as f: c = f.read()
@@ -201,7 +212,6 @@ PYEOF
 echo "✅ Correctifs post-patch appliqués"
 
 # ==================== 3. FIXES COMPATIBILITÉ 4.19 (V7.24) ====================
-# (Je garde le bloc V7.24 complet car il est vital)
 echo ""
 echo "=== Fixes compatibilité 4.19 (V7.24) ==="
 [ ! -f "include/linux/static_call.h" ] && cat > include/linux/static_call.h <<'EOF'
@@ -314,17 +324,6 @@ if [ -f "$KPM" ]; then
     sed -i 's/ksu_access_ok(/__AOK__PH__(/g' "$KPM"
     sed -i 's/access_ok(/ksu_access_ok(/g' "$KPM"
     sed -i 's/__AOK__PH__(/ksu_access_ok(/g' "$KPM"
-fi
-COMPAT="drivers/kernelsu/kernel_compat.h"
-if [ -f "$COMPAT" ] && ! grep -q 'define ksu_access_ok' "$COMPAT"; then
-    python3 - "$COMPAT" <<'PYEOF'
-import sys, re
-with open(sys.argv[1]) as f: c = f.read()
-macro = '\n#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)\n#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)\n#else\n#define ksu_access_ok(addr, size) access_ok(addr, size)\n#endif\n'
-m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
-if m: c = c[:m[-1].end()] + macro + c[m[-1].end():]
-with open(sys.argv[1], 'w') as f: f.write(c)
-PYEOF
 fi
 
 FEAT="drivers/kernelsu/include/uapi/feature.h"
@@ -508,6 +507,65 @@ if 'ksu_handle_stat' not in c:
 PYEOF
 fi
 
+# ==================== 5b. NORMALISATION kernel_compat.h (CORRECTIF V7.28.1) ====================
+echo ""
+echo "=== Normalisation kernel_compat.h ==="
+
+COMPAT_REAL="$(find drivers/kernelsu -name kernel_compat.h -type f 2>/dev/null | head -1)"
+if [ -z "$COMPAT_REAL" ]; then
+    echo "❌ kernel_compat.h introuvable dans drivers/kernelsu/"
+    echo "   → Le patch sukisu_ultra_fixed.patch a probablement échoué."
+    ls -la drivers/kernelsu/ || true
+    find drivers/kernelsu -name '*.h' | head -20 || true
+    exit 1
+fi
+echo "  Source trouvée : $COMPAT_REAL"
+
+# Ajouter le macro ksu_access_ok si absent
+if ! grep -q 'define ksu_access_ok' "$COMPAT_REAL"; then
+    python3 - "$COMPAT_REAL" <<'PYEOF'
+import sys, re
+with open(sys.argv[1]) as f: c = f.read()
+macro = '\n#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)\n#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)\n#else\n#define ksu_access_ok(addr, size) access_ok(addr, size)\n#endif\n'
+m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
+if m: c = c[:m[-1].end()] + macro + c[m[-1].end():]
+with open(sys.argv[1], 'w') as f: f.write(c)
+PYEOF
+    echo "  ✅ macro ksu_access_ok ajouté à $COMPAT_REAL"
+fi
+
+# Rendre le fichier disponible aux DEUX emplacements
+mkdir -p drivers/kernelsu/infra
+for target in \
+    drivers/kernelsu/kernel_compat.h \
+    drivers/kernelsu/infra/kernel_compat.h ; do
+    if [ ! -f "$target" ]; then
+        cp "$COMPAT_REAL" "$target"
+        echo "  ✅ créé $target"
+    fi
+done
+
+# S'assurer que -I$(srctree)/$(src) est présent dans le Makefile de kernelsu
+KSU_MK="drivers/kernelsu/Makefile"
+if [ -f "$KSU_MK" ] && ! grep -qE '^\s*ccflags-y\s*\+=\s*-I' "$KSU_MK"; then
+    echo 'ccflags-y += -I$(srctree)/$(src)' >> "$KSU_MK"
+    echo "  ✅ ajouté -I\$(srctree)/\$(src) à $KSU_MK"
+fi
+
+# Fix générique : tout #include "infra/xxx.h" qui pointe vers un fichier
+# présent à la racine de drivers/kernelsu/ → on le copie sous infra/
+for inc in $(grep -rhoP '(?<=#include\s")infra/[^"]+(?=")' drivers/kernelsu 2>/dev/null | sort -u); do
+    src="drivers/kernelsu/${inc#infra/}"
+    dst="drivers/kernelsu/$inc"
+    if [ ! -f "$dst" ] && [ -f "$src" ]; then
+        mkdir -p "$(dirname "$dst")"
+        cp "$src" "$dst"
+        echo "  ✅ infra fix: $inc"
+    fi
+done
+
+echo "✅ kernel_compat.h normalisé"
+
 # ==================== 6. CONFIGURATION ====================
 echo ""
 echo "=== Configuration SukiSU-Ultra + SUSFS ==="
@@ -572,7 +630,7 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f "out/arch/arm64/boot/Image" ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.28) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.28.1) ✅✅✅"
 
 # ==================== 9. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
@@ -636,7 +694,7 @@ cd "$GITHUB_WORKSPACE"
 # ==================== 11. REPACK ====================
 echo ""
 echo "=== Repack ==="
-set +e 
+set +e
 rm -f ./boot-stock.img ./dtbo-stock.img 2>/dev/null
 gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img
 gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
@@ -681,5 +739,5 @@ set -e
 
 # ==================== 12. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v7.28 ==="
+echo "=== BUILD TERMINÉ v7.28.1 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
