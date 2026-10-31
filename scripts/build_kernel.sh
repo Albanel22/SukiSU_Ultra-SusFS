@@ -2,16 +2,16 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.35 : SukiSU-Ultra builtin + SUSFS v2.3.0
-#         - builtin conservé
-#         - CONFIG_KSU_MANUAL_HOOK supprimé (obsolète)
+# V7.36 : SukiSU-Ultra builtin + SUSFS v2.3.0
 #         - injection manuelle des hunks fs/namespace.c
 #         - DEFAULT_KSU_MNT_ID ajouté
 #         - stub linux/static_call.h pour 4.19
 #         - correction inotify_fdinfo (3 args)
+#         - correction cpu_spoof.c (vdso_clock_mode)
+#         - correction kpm.c (access_ok)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.35 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.36 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -172,7 +172,6 @@ if 'DEFAULT_KSU_MNT_ID' in c:
             f.write(c)
         print("  ✅ DEFAULT_KSU_MNT_ID ajouté")
     else:
-        # fallback : ajoute avant la première utilisation
         c = '#define DEFAULT_KSU_MNT_ID 500000\n#define DEFAULT_KSU_MNT_GROUP_ID 5000\n' + c
         with open(path, 'w') as f:
             f.write(c)
@@ -261,6 +260,103 @@ print("  ✅ fs/notify/fdinfo.c : inotify_fdinfo corrigée (3 args)")
 PYEOF
 
 # -----------------------------------------------------------------------------
+# 3c. Correction cpu_spoof.c (vdso_clock_mode)
+# -----------------------------------------------------------------------------
+echo ""
+echo "=== Correction cpu_spoof.c (vdso_clock_mode) ==="
+python3 - <<'PYEOF'
+import re, sys
+
+path = 'drivers/kernelsu/extension/cpu_spoof.c'
+try:
+    with open(path) as f:
+        c = f.read()
+except FileNotFoundError:
+    print("  ⚠️ cpu_spoof.c introuvable, skip")
+    sys.exit(0)
+
+if 'CPU_SPOOF_VDSO_FIX' in c:
+    print("  ↻ cpu_spoof.c : déjà corrigé, skip")
+    sys.exit(0)
+
+pattern = r'(\s*)(\(\*curr_cs_ptr\)->vdso_clock_mode\s*=\s*[^;]+;)'
+match = re.search(pattern, c)
+if not match:
+    print("  ⚠️ vdso_clock_mode pattern introuvable, skip")
+    sys.exit(0)
+
+indent = match.group(1)
+stmt = match.group(2)
+
+new_block = f'''
+{indent}/* CPU_SPOOF_VDSO_FIX : vdso_clock_mode n'existe pas sur 4.19 */
+{indent}#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
+{indent}{stmt}
+{indent}#endif
+'''
+c = c[:match.start()] + new_block + c[match.end():]
+
+with open(path, 'w') as f:
+    f.write(c)
+print("  ✅ cpu_spoof.c : vdso_clock_mode protégé")
+PYEOF
+
+# -----------------------------------------------------------------------------
+# 3d. Correction kpm.c (access_ok)
+# -----------------------------------------------------------------------------
+echo ""
+echo "=== Correction kpm.c (access_ok 2 args vs 3 args) ==="
+python3 - <<'PYEOF'
+import re, sys
+
+# 1. Ajouter le wrapper dans kernel_compat.h
+compat_path = 'drivers/kernelsu/kernel_compat.h'
+try:
+    with open(compat_path) as f:
+        compat = f.read()
+except FileNotFoundError:
+    print("  ⚠️ kernel_compat.h introuvable, skip")
+    sys.exit(0)
+
+if 'KSU_ACCESS_OK_FIX' not in compat:
+    wrapper = '''
+/* KSU_ACCESS_OK_FIX : access_ok sur 4.19 ARM64 attend 3 args */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)
+#else
+#define ksu_access_ok(addr, size) access_ok(addr, size)
+#endif
+'''
+    includes = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', compat))
+    if includes:
+        compat = compat[:includes[-1].end()] + wrapper + compat[includes[-1].end():]
+    else:
+        compat = wrapper + compat
+    with open(compat_path, 'w') as f:
+        f.write(compat)
+    print("  ✅ kernel_compat.h : ksu_access_ok ajouté")
+
+# 2. Remplacer access_ok par ksu_access_ok dans kpm.c
+kpm_path = 'drivers/kernelsu/extension/kpm/kpm.c'
+try:
+    with open(kpm_path) as f:
+        kpm = f.read()
+except FileNotFoundError:
+    print("  ⚠️ kpm.c introuvable, skip")
+    sys.exit(0)
+
+if 'ksu_access_ok' in kpm:
+    print("  ↻ kpm.c : déjà corrigé, skip")
+    sys.exit(0)
+
+kpm = re.sub(r'(?<!ksu_)access_ok\s*\(', 'ksu_access_ok(', kpm)
+
+with open(kpm_path, 'w') as f:
+    f.write(kpm)
+print("  ✅ kpm.c : access_ok → ksu_access_ok")
+PYEOF
+
+# -----------------------------------------------------------------------------
 # 4. Config
 # -----------------------------------------------------------------------------
 echo ""
@@ -334,14 +430,14 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.35) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.36) ✅✅✅"
 
 # -----------------------------------------------------------------------------
 # 7. Sauvegarde
 # -----------------------------------------------------------------------------
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.35-susfs"
-[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.35-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.36-susfs"
+[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.36-susfs"
 
 # -----------------------------------------------------------------------------
 # 8. Repack
@@ -370,7 +466,7 @@ cd repack
 ./magiskboot unpack boot.img
 cp "$GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image" kernel
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.35-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.36-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 
@@ -378,5 +474,5 @@ echo "✅ boot.img repacké"
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.35 ==="
+echo "=== BUILD TERMINÉ v7.36 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
