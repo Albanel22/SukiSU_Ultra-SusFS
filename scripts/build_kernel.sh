@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.38 : SukiSU-Ultra builtin + SUSFS v2.3.0
-#         - Compilation de ksud et injection dans le ramdisk
+# V7.39 : SukiSU-Ultra builtin + SUSFS v2.3.0
+#         - Correctif manager detection (ksu_install_fd O_CLOEXEC → 0)
+#         - Compilation ksud robuste (libclang-dev + erreurs visibles)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.38 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.39 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -20,7 +21,7 @@ sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.l
 sudo apt-get update
 sudo apt-get install -y bc bison build-essential flex libelf-dev libssl-dev \
   libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld \
-  device-tree-compiler zip unzip curl git python3 python3-pip cpio patch wget
+  device-tree-compiler zip unzip curl git python3 python3-pip cpio patch wget libclang-dev
 
 pip3 install --quiet gdown
 cd "$GITHUB_WORKSPACE"
@@ -45,6 +46,43 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 
 [ -d drivers/kernelsu ] || { echo "❌ drivers/kernelsu absent"; exit 1; }
 echo "✅ SukiSU-Ultra intégré"
+
+# -----------------------------------------------------------------------------
+# 2a. Correctif manager detection (O_CLOEXEC)
+# -----------------------------------------------------------------------------
+echo ""
+echo "=== Correctif manager detection (ksu_install_fd O_CLOEXEC → 0) ==="
+python3 - <<'PYEOF'
+import re, sys
+
+path = 'drivers/kernelsu/kernel/supercall/supercall.c'
+try:
+    with open(path) as f:
+        c = f.read()
+except FileNotFoundError:
+    print("  ⚠️ supercall.c introuvable, skip")
+    sys.exit(0)
+
+if 'MSG123' in c:
+    print("  ↻ supercall.c : déjà patché, skip")
+    sys.exit(0)
+
+# Cible l'appel dans ksu_install_fd()
+c2, n1 = re.subn(
+    r'(int\s+ksu_install_fd\s*\(\s*void\s*\)\s*\{[^}]*?)return\s+ksu_install_fd_with_permissions\s*\(\s*O_CLOEXEC\s*,\s*0\s*\)',
+    r'\1return ksu_install_fd_with_permissions(0, 0); /* MSG123: manager detection fix */',
+    c,
+    flags=re.DOTALL
+)
+
+if n1 == 0:
+    print("  ⚠️ ksu_install_fd pattern introuvable dans supercall.c")
+    sys.exit(0)
+
+with open(path, 'w') as f:
+    f.write(c2)
+print(f"  ✅ supercall.c : ksu_install_fd corrigé (O_CLOEXEC → 0)")
+PYEOF
 
 # -----------------------------------------------------------------------------
 # 2b. Patch SUSFS 4.19
@@ -392,7 +430,7 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.38) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.39) ✅✅✅"
 
 # -----------------------------------------------------------------------------
 # 6b. VÉRIFICATION STRICTE DES SYMBOLES KSU DANS LE NOYAU
@@ -406,11 +444,6 @@ fi
 KSU_SYMS=$(grep -E 'ksu_handle_execveat|ksu_handle_stat|ksu_handle_faccessat|ksu_handle_vfs_read' out/System.map || true)
 if [ -z "$KSU_SYMS" ]; then
     echo "❌ Aucun symbole ksu_handle_* trouvé dans System.map"
-    echo "   → Les hooks n'ont pas été compilés. Causes possibles :"
-    echo "     - CONFIG_KSU n'était pas actif pendant la compilation"
-    echo "     - Les hooks ont été injectés dans des fichiers non compilés"
-    echo "   → Lignes CONFIG_KSU dans .config :"
-    grep 'CONFIG_KSU' out/.config
     exit 1
 fi
 echo "✅ Symboles KSU trouvés :"
@@ -420,8 +453,8 @@ echo "$KSU_SYMS" | head -10
 # 7. Sauvegarde
 # -----------------------------------------------------------------------------
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.38-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.38-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.39-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.39-susfs"
 
 # -----------------------------------------------------------------------------
 # 7b. Compilation ksud (avec affichage des erreurs)
@@ -430,14 +463,10 @@ echo ""
 echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
 
-# Dépendance manquante pour bindgen
-sudo apt-get install -y libclang-dev
-
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly 2>&1 | tail -3 || true
 source "$HOME/.cargo/env" || true
 [ -x "$HOME/.cargo/bin/cargo" ] || { echo "❌ cargo absent"; exit 1; }
 
-# Vérifie la version de Rust (edition2024 nécessite >= 1.85)
 rustc --version
 rustup update nightly 2>&1 | tail -3 || true
 rustup target add aarch64-linux-android 2>&1 | tail -2 || true
@@ -492,6 +521,8 @@ chmod 755 "$GITHUB_WORKSPACE/ksud"
 KSUD_OK=1
 echo "✅ ksud compilé"
 
+cd "$GITHUB_WORKSPACE"
+
 # -----------------------------------------------------------------------------
 # 8. Repack
 # -----------------------------------------------------------------------------
@@ -535,7 +566,7 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.38-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.39-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 
@@ -543,5 +574,5 @@ echo "✅ boot.img repacké"
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.38 ==="
+echo "=== BUILD TERMINÉ v7.39 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
