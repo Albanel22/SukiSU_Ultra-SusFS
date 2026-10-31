@@ -2,13 +2,16 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.34 : SukiSU-Ultra builtin + SUSFS v2.3.0
-#         - builtin conservé (branche actuelle SukiSU-Ultra)
-#         - CONFIG_KSU_MANUAL_HOOK supprimé (option obsolète)
-#         - injection manuelle des hunks rejetés de fs/namespace.c
+# V7.35 : SukiSU-Ultra builtin + SUSFS v2.3.0
+#         - builtin conservé
+#         - CONFIG_KSU_MANUAL_HOOK supprimé (obsolète)
+#         - injection manuelle des hunks fs/namespace.c
+#         - DEFAULT_KSU_MNT_ID ajouté
+#         - stub linux/static_call.h pour 4.19
+#         - correction inotify_fdinfo (3 args)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.34 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.35 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -49,7 +52,7 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 echo "✅ SukiSU-Ultra intégré"
 
 # -----------------------------------------------------------------------------
-# 2b. Patch SUSFS 4.19 — avec gestion des rejets
+# 2b. Patch SUSFS 4.19
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Patch SUSFS 4.19 (JackA1ltman) ==="
@@ -148,6 +151,54 @@ PYEOF
     echo "  ✅ fs/namespace.c corrigé"
 fi
 
+# --- Correction DEFAULT_KSU_MNT_ID ---
+echo "  → Ajout de DEFAULT_KSU_MNT_ID…"
+python3 - <<'PYEOF'
+import sys
+
+path = 'fs/namespace.c'
+with open(path) as f:
+    c = f.read()
+
+if '#define DEFAULT_KSU_MNT_ID' in c:
+    print("  ↻ DEFAULT_KSU_MNT_ID déjà défini")
+    sys.exit(0)
+
+if 'DEFAULT_KSU_MNT_ID' in c:
+    anchor = '#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */'
+    if anchor in c:
+        c = c.replace(anchor, anchor + '\n#define DEFAULT_KSU_MNT_ID 500000\n#define DEFAULT_KSU_MNT_GROUP_ID 5000\n', 1)
+        with open(path, 'w') as f:
+            f.write(c)
+        print("  ✅ DEFAULT_KSU_MNT_ID ajouté")
+    else:
+        # fallback : ajoute avant la première utilisation
+        c = '#define DEFAULT_KSU_MNT_ID 500000\n#define DEFAULT_KSU_MNT_GROUP_ID 5000\n' + c
+        with open(path, 'w') as f:
+            f.write(c)
+        print("  ✅ DEFAULT_KSU_MNT_ID ajouté en tête de fichier")
+else:
+    print("  ↻ DEFAULT_KSU_MNT_ID non utilisé, skip")
+PYEOF
+
+# --- Stub linux/static_call.h pour 4.19 ---
+echo "  → Création du stub linux/static_call.h pour 4.19…"
+if [ ! -f include/linux/static_call.h ]; then
+    cat > include/linux/static_call.h <<'EOF'
+#ifndef _LINUX_STATIC_CALL_H
+#define _LINUX_STATIC_CALL_H
+/* Stub pour noyaux < 5.10 : les static calls ne sont pas supportées. */
+#define static_call(name) (name##_static_call)
+#define static_call_cond(name) (name##_static_call)
+#define static_call_update(name, func) do { } while (0)
+#define static_call_query(name) (name##_static_call)
+#endif
+EOF
+    echo "    ✅ stub créé"
+else
+    echo "    ↻ stub déjà présent"
+fi
+
 find . -name "*.rej" -delete 2>/dev/null || true
 
 for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
@@ -174,8 +225,11 @@ chmod +x "$HOOK_SCRIPT"
 bash "$HOOK_SCRIPT" || { echo "❌ injection hooks échouée"; exit 1; }
 echo "✅ hooks injectés"
 
-# Correction fs/notify/fdinfo.c : inotify_fdinfo doit accepter 3 args
-echo "  → Correction fs/notify/fdinfo.c (signature inotify_fdinfo)…"
+# -----------------------------------------------------------------------------
+# 3b. Correction fs/notify/fdinfo.c (inotify_fdinfo 3 args)
+# -----------------------------------------------------------------------------
+echo ""
+echo "=== Correction fs/notify/fdinfo.c (signature inotify_fdinfo) ==="
 python3 - <<'PYEOF'
 import re, sys
 
@@ -183,12 +237,10 @@ path = 'fs/notify/fdinfo.c'
 with open(path) as f:
     c = f.read()
 
-# Si déjà corrigé, skip
 if 'SUSFS_FDINFO_3ARGS_FIX' in c:
     print("  ↻ fs/notify/fdinfo.c : déjà corrigé, skip")
     sys.exit(0)
 
-# Cherche la définition de inotify_fdinfo (2 args)
 pattern = r'static\s+void\s+inotify_fdinfo\s*\(\s*struct\s+seq_file\s*\*\s*(\w+)\s*,\s*struct\s+fsnotify_mark\s*\*\s*(\w+)\s*\)'
 match = re.search(pattern, c)
 if not match:
@@ -198,11 +250,9 @@ if not match:
 m_name = match.group(1)
 mark_name = match.group(2)
 
-# Remplace la signature pour ajouter struct file *f (ignoré)
 new_sig = f'static void inotify_fdinfo(struct seq_file *{m_name}, struct fsnotify_mark *{mark_name}, struct file *f)'
 c = c[:match.start()] + new_sig + c[match.end():]
 
-# Marque la correction
 c = '/* SUSFS_FDINFO_3ARGS_FIX : inotify_fdinfo accepte 3 args pour show_fdinfo */\n' + c
 
 with open(path, 'w') as f:
@@ -252,7 +302,6 @@ EOF
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   olddefconfig 2>&1 | tail -3
 
-# Vérif config critique (sans MANUAL_HOOK qui n'existe plus)
 for opt in CONFIG_KSU CONFIG_KSU_SUSFS \
            CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_KSTAT; do
     grep -q "^${opt}=y" out/.config || { echo "❌ ${opt} droppé"; exit 1; }
@@ -285,14 +334,14 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.34) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.35) ✅✅✅"
 
 # -----------------------------------------------------------------------------
 # 7. Sauvegarde
 # -----------------------------------------------------------------------------
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.34-susfs"
-[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.34-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.35-susfs"
+[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.35-susfs"
 
 # -----------------------------------------------------------------------------
 # 8. Repack
@@ -321,7 +370,7 @@ cd repack
 ./magiskboot unpack boot.img
 cp "$GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image" kernel
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.34-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.35-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 
@@ -329,5 +378,5 @@ echo "✅ boot.img repacké"
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.34 ==="
+echo "=== BUILD TERMINÉ v7.35 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
