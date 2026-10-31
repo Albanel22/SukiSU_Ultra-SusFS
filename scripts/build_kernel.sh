@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.25 : SukiSU-Ultra builtin — V7.24 (Manager OK) + SUSFS v2.3.0
+# V7.26 : SukiSU-Ultra builtin — V7.24 (Manager OK) + SUSFS v2.3.0 (Partiel)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.25 (SUSFS) ==="
+echo "=== Build SukiSU-Ultra builtin — V7.26 (SUSFS Partiel) ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -122,7 +122,6 @@ if 'DEFAULT_KSU_MNT_MINOR_DEV' not in sd:
     sd += '\n#ifndef DEFAULT_KSU_MNT_MINOR_DEV\n#define DEFAULT_KSU_MNT_MINOR_DEV (1 << 12)\n#endif\n'
 if 'CL_COPY_MNT_NS' not in sd:
     sd += '\n#ifndef CL_COPY_MNT_NS\n#define CL_COPY_MNT_NS BIT(25)\n#endif\n'
-# FIX : Ajout de la déclaration manquante pour fs/super.c
 if 'susfs_is_sdcard_android_data_not_decrypted' not in sd:
     sd += '\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
 with open('include/linux/susfs_def.h', 'w') as f: f.write(sd)
@@ -149,6 +148,27 @@ if 'susfs_is_current_ksu_domain' not in sh:
 if 'susfs_set_priority_uid_filter' not in sh:
     sh += '\nextern void susfs_set_priority_uid_filter(void __user **user_info);\n'
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
+PYEOF
+
+# ==================== FIX CRITIQUE POUR SUS_KSTAT SANS SUS_MOUNT ====================
+echo "    → Correction de fs/notify/fdinfo.c (incompatibilité signature)..."
+python3 - <<'PYEOF'
+import re
+with open('fs/notify/fdinfo.c', 'r') as f: c = f.read()
+
+# Corriger la condition de show_fdinfo : 3 args uniquement si SUS_MOUNT est actif
+c = re.sub(
+    r'#if defined\(CONFIG_KSU_SUSFS_SUS_MOUNT\) \|\| defined\(CONFIG_KSU_SUSFS_SUS_KSTAT\)\s*\n'
+    r'static void show_fdinfo\(struct seq_file \*m, struct file \*f,\s*\n'
+    r'\s*void \(\*show\)\(struct seq_file \*m,\s*\n'
+    r'\s*struct fsnotify_mark \*mark,\s*\n'
+    r'\s*struct file \*file\)\)\s*\n'
+    r'#else',
+    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nstatic void show_fdinfo(struct seq_file *m, struct file *f,\n\t\t\tvoid (*show)(struct seq_file *m,\n\t\t\t\t     struct fsnotify_mark *mark,\n\t\t\t\t\t struct file *file))\n#else',
+    c
+)
+with open('fs/notify/fdinfo.c', 'w') as f: f.write(c)
+print("    ✅ fs/notify/fdinfo.c corrigé.")
 PYEOF
 
 echo "✅ Correctifs post-patch appliqués"
@@ -481,12 +501,12 @@ CONFIG_KSU_FEATURE_ADBROOT=y
 # SUSFS (Partiel - Sécurisé pour le boot)
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_SUS_PATH=y
-# CONFIG_KSU_SUSFS_SUS_MOUNT is not set       <-- COUPE ÇA (C'est lui qui panic)
+# CONFIG_KSU_SUSFS_SUS_MOUNT is not set
 CONFIG_KSU_SUSFS_SUS_KSTAT=y
 CONFIG_KSU_SUSFS_SPOOF_UNAME=y
 CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-# CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set   <-- COUPE ÇA AUSSI (Modifie le VFS)
+# CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set
 CONFIG_KSU_SUSFS_SUS_MAP=y
 
 # Dépendances non-GKI
@@ -524,12 +544,12 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f "out/arch/arm64/boot/Image" ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.25) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.26) ✅✅✅"
 
 # ==================== 9. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.25-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.25-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.26-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.26-susfs"
 
 # ==================== 10. COMPILATION KSUD ====================
 echo ""
@@ -575,7 +595,7 @@ EOF
     if [ "$CARGO_RC" -eq 0 ]; then
         KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
-            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v7.25"
+            cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v7.26"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
             chmod 755 "$GITHUB_WORKSPACE/ksud"
             KSUD_OK=1
@@ -595,7 +615,7 @@ gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O dtbo-stock.img
 
 if [ ! -f "boot-stock.img" ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable (Google Drive bloqué)."
-    echo "⚠️ On saute le repack, mais ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v7.25-susfs"
+    echo "⚠️ On saute le repack, mais ton fichier Image est SAUVEGARDÉ dans $GITHUB_WORKSPACE/output/Image-v7.26-susfs"
     exit 0
 fi
 
@@ -626,12 +646,12 @@ else
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.25-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.26-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké avec succès"
 set -e
 
 # ==================== 12. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v7.25 ==="
+echo "=== BUILD TERMINÉ v7.26 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
