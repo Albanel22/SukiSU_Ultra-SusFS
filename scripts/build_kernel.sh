@@ -424,63 +424,73 @@ cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.38-susfs"
 cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.38-susfs"
 
 # -----------------------------------------------------------------------------
-# 7b. Compilation et injection de ksud dans le ramdisk
+# 7b. Compilation ksud (avec affichage des erreurs)
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
 
+# Dépendance manquante pour bindgen
+sudo apt-get install -y libclang-dev
+
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly 2>&1 | tail -3 || true
 source "$HOME/.cargo/env" || true
-[ -x "$HOME/.cargo/bin/cargo" ] || { echo "❌ cargo absent — ksud ne sera pas compilé"; }
+[ -x "$HOME/.cargo/bin/cargo" ] || { echo "❌ cargo absent"; exit 1; }
 
-if [ -x "$HOME/.cargo/bin/cargo" ]; then
-    rustup target add aarch64-linux-android 2>&1 | tail -2 || true
+# Vérifie la version de Rust (edition2024 nécessite >= 1.85)
+rustc --version
+rustup update nightly 2>&1 | tail -3 || true
+rustup target add aarch64-linux-android 2>&1 | tail -2 || true
 
-    wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip || true
-    unzip -q android-ndk-r26d-linux.zip || true
-    export ANDROID_NDK_ROOT="$GITHUB_WORKSPACE/android-ndk-r26d"
-    export AARCH64_CLANG_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
-    export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
-    export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip || true
+unzip -q android-ndk-r26d-linux.zip || true
+export ANDROID_NDK_ROOT="$GITHUB_WORKSPACE/android-ndk-r26d"
+export AARCH64_CLANG_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
+export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 
-    rm -rf "$GITHUB_WORKSPACE/ksud-src"
-    git clone --depth=1 --branch builtin https://github.com/ShirkNeko/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+rm -rf "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 --branch builtin https://github.com/ShirkNeko/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
 
-    KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -name 'Cargo.toml' -type f 2>/dev/null | while read cargo; do
-        if grep -qE 'name\s*=\s*"ksud"' "$cargo" 2>/dev/null; then dirname "$cargo"; break; fi
-    done | head -1)
+KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -name 'Cargo.toml' -type f 2>/dev/null | while read cargo; do
+    if grep -qE 'name\s*=\s*"ksud"' "$cargo" 2>/dev/null; then dirname "$cargo"; break; fi
+done | head -1)
 
-    if [ -n "$KSUD_DIR" ]; then
-        (
-            cd "$KSUD_DIR"
-            mkdir -p .cargo
-            cat > .cargo/config.toml <<EOF
+if [ -z "$KSUD_DIR" ]; then
+    echo "❌ Cargo.toml de ksud introuvable"
+    exit 1
+fi
+
+(
+    cd "$KSUD_DIR"
+    mkdir -p .cargo
+    cat > .cargo/config.toml <<EOF
 [target.aarch64-linux-android]
 linker = "$AARCH64_CLANG_PATH"
 [env]
 CC_aarch64_linux_android = "$AARCH64_CLANG_PATH"
 CXX_aarch64_linux_android = "$AARCH64_CLANGXX_PATH"
 AR_aarch64_linux_android = "$AR_PATH"
+BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android = "--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 EOF
-            export CARGO_NET_GIT_FETCH_WITH_CLI=true
-            cargo build --release --target aarch64-linux-android 2>&1 | tail -10
-        ) || true
-    fi
-fi
+    export CARGO_NET_GIT_FETCH_WITH_CLI=true
+    echo "→ cargo build (affichage complet des erreurs)…"
+    cargo build --release --target aarch64-linux-android 2>&1 | tail -40
+) || {
+    echo "❌ cargo build a échoué — voir les erreurs ci-dessus"
+    exit 1
+}
 
 KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
 if [ -z "$KSUD_BINARY" ]; then
-    echo "⚠️ ksud non compilé — le manager ne détectera probablement pas le noyau"
-    KSUD_OK=0
-else
-    cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
-    chmod 755 "$GITHUB_WORKSPACE/ksud"
-    KSUD_OK=1
-    echo "✅ ksud compilé"
+    echo "❌ ksud introuvable après cargo build"
+    exit 1
 fi
 
-cd "$GITHUB_WORKSPACE"
+cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
+chmod 755 "$GITHUB_WORKSPACE/ksud"
+KSUD_OK=1
+echo "✅ ksud compilé"
 
 # -----------------------------------------------------------------------------
 # 8. Repack
