@@ -174,8 +174,8 @@ chmod +x "$HOOK_SCRIPT"
 bash "$HOOK_SCRIPT" || { echo "❌ injection hooks échouée"; exit 1; }
 echo "✅ hooks injectés"
 
-# Correction fs/notify/fdinfo.c pour compatibilité 4.19 (signature show_fdinfo)
-echo "  → Correction fs/notify/fdinfo.c pour compatibilité 4.19…"
+# Correction fs/notify/fdinfo.c : inotify_fdinfo doit accepter 3 args
+echo "  → Correction fs/notify/fdinfo.c (signature inotify_fdinfo)…"
 python3 - <<'PYEOF'
 import re, sys
 
@@ -183,53 +183,31 @@ path = 'fs/notify/fdinfo.c'
 with open(path) as f:
     c = f.read()
 
-# Si le fichier a déjà été corrigé, skip
-if 'SUSFS_FDINFO_2ARGS_FIX' in c:
+# Si déjà corrigé, skip
+if 'SUSFS_FDINFO_3ARGS_FIX' in c:
     print("  ↻ fs/notify/fdinfo.c : déjà corrigé, skip")
     sys.exit(0)
 
-# Cherche la définition de show_fdinfo
-# Si elle a 2 paramètres (fsnotify_mark seulement), alors les appels avec 3 args sont invalides
-pattern = r'static\s+void\s+show_fdinfo\s*\([^)]*struct\s+fsnotify_mark\s*\*[^)]*\)'
+# Cherche la définition de inotify_fdinfo (2 args)
+pattern = r'static\s+void\s+inotify_fdinfo\s*\(\s*struct\s+seq_file\s*\*\s*(\w+)\s*,\s*struct\s+fsnotify_mark\s*\*\s*(\w+)\s*\)'
 match = re.search(pattern, c)
 if not match:
-    print("  ⚠️ show_fdinfo pattern introuvable, skip")
+    print("  ⚠️ inotify_fdinfo pattern introuvable, skip")
     sys.exit(0)
 
-sig = match.group(0)
-# Vérifie si struct file * est présent dans la signature
-if 'struct file' not in sig:
-    # Signature à 2 args : il faut wrapper les appels à 3 args
-    # On cherche les appels du type show_fdinfo(m, f, xxx_fdinfo)
-    # et on les remplace par un wrapper qui ignore f
-    wrapper = '''
-/* SUSFS_FDINFO_2ARGS_FIX : wrapper pour compatibilité 4.19 */
-static void __susfs_show_fdinfo_2args(struct seq_file *m, struct file *f,
-                                       void (*show)(struct seq_file *, struct fsnotify_mark *))
-{
-    show(m, NULL); /* f ignoré, mais le 2e arg est fourni par l'appelant */
-}
-'''
-    # Insère le wrapper avant la première utilisation de show_fdinfo
-    # On cherche la première occurrence de "show_fdinfo(m, f,"
-    call_pattern = r'show_fdinfo\s*\(\s*m\s*,\s*f\s*,\s*(\w+)\s*\)'
-    if re.search(call_pattern, c):
-        # Remplace les appels à 3 args par un appel direct à la fonction de show
-        # avec seulement les 2 premiers args
-        c = re.sub(r'show_fdinfo\s*\(\s*m\s*,\s*f\s*,\s*(\w+)\s*\)',
-                   r'\1(m, NULL)', c)
-        # Ajoute un commentaire de traçabilité
-        c = '/* SUSFS_FDINFO_2ARGS_FIX : appels 3-args convertis en 2-args */\n' + c
-        print("  ✅ fs/notify/fdinfo.c : appels show_fdinfo corrigés (3→2 args)")
-    else:
-        print("  ⚠️ Aucun appel show_fdinfo(m, f, ...) trouvé, skip")
-        sys.exit(0)
-else:
-    print("  ↻ show_fdinfo a déjà 3 args, pas de correction nécessaire")
-    sys.exit(0)
+m_name = match.group(1)
+mark_name = match.group(2)
+
+# Remplace la signature pour ajouter struct file *f (ignoré)
+new_sig = f'static void inotify_fdinfo(struct seq_file *{m_name}, struct fsnotify_mark *{mark_name}, struct file *f)'
+c = c[:match.start()] + new_sig + c[match.end():]
+
+# Marque la correction
+c = '/* SUSFS_FDINFO_3ARGS_FIX : inotify_fdinfo accepte 3 args pour show_fdinfo */\n' + c
 
 with open(path, 'w') as f:
     f.write(c)
+print("  ✅ fs/notify/fdinfo.c : inotify_fdinfo corrigée (3 args)")
 PYEOF
 
 # -----------------------------------------------------------------------------
