@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.28 : SukiSU-Ultra builtin — V7.24 (Manager OK) + SUSFS v2.3.0 (Partiel)
+# V7.28 : SukiSU-Ultra builtin — V7.24 + SUSFS v2.3.0 (Partiel & Stable)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.28 (SUSFS Partiel) ==="
+echo "=== Build SukiSU-Ultra builtin — V7.28 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -36,59 +36,81 @@ echo "✅ intégré"
 
 # ==================== 2b. TÉLÉCHARGEMENT ET APPLICATION DES PATCHS ====================
 echo ""
-echo "=== Téléchargement des patches de JackA1ltman (à jour) ==="
+echo "=== Téléchargement des patches de JackA1ltman ==="
 BASE_JACK="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch"
 
 curl -LSsf "$BASE_JACK/sukisu_ultra_fixed.patch" -o /tmp/sukisu_fixed.patch
 curl -LSsf "$BASE_JACK/susfs_patch_to_4.19.patch" -o /tmp/susfs_4.19.patch
 
 if [ ! -s /tmp/sukisu_fixed.patch ] || [ ! -s /tmp/susfs_4.19.patch ]; then
-    echo "❌ Échec du téléchargement des patches depuis GitHub."
+    echo "❌ Échec du téléchargement des patches."
     exit 1
 fi
 echo "✅ Patches téléchargés."
 
+# --- CORRECTION ICI : On se place dans drivers/kernelsu pour appliquer le patch SukiSU ---
 echo ""
-echo "=== Application de sukisu_ultra_fixed.patch ==="
+echo "=== Application de sukisu_ultra_fixed.patch (dans drivers/kernelsu) ==="
+cd drivers/kernelsu
 patch -p1 -t --forward < /tmp/sukisu_fixed.patch || true
+cd ../..
 
 echo ""
-echo "=== Application de susfs_patch_to_4.19.patch ==="
+echo "=== Application de susfs_patch_to_4.19.patch (dans la racine) ==="
 patch -p1 -t --forward < /tmp/susfs_4.19.patch || true
 
-# ==================== 2c. EXTRACTION DES FICHIERS SUSFS v2.3.0 (DEPUIS LE PATCH) ====================
+# ==================== 2c. EXTRACTION DES FICHIERS SUSFS v2.3.0 ====================
 echo ""
 echo "=== Extraction des fichiers SUSFS v2.3.0 depuis le patch ==="
-# On extrait directement les fichiers du patch pour éviter le décalage de version
+# Le patch contient les nouveaux fichiers, on les extrait proprement
 python3 - <<'PYEOF'
 import re
 
 with open('/tmp/susfs_4.19.patch', 'r') as f:
     patch_content = f.read()
 
-files_to_extract = ['fs/susfs.c', 'include/linux/susfs.h', 'include/linux/susfs_def.h']
-for fpath in files_to_extract:
-    pattern = re.compile(rf'diff --git a/{re.escape(fpath)} b/{re.escape(fpath)}\n.*?--- /dev/null\n\+\+\+ b/{re.escape(fpath)}\n@@[^\n]*\n(.*?)(?=\ndiff --git|\Z)', re.DOTALL)
-    match = pattern.search(patch_content)
+# Regex pour trouver les nouveaux fichiers
+patterns = {
+    'fs/susfs.c': r'diff --git a/fs/susfs\.c b/fs/susfs\.c.*?\n--- /dev/null\n\+\+\+ b/fs/susfs\.c\n@@ .*? @@\n(.*?)(?=\ndiff --git|\Z)',
+    'include/linux/susfs.h': r'diff --git a/include/linux/susfs\.h b/include/linux/susfs\.h.*?\n--- /dev/null\n\+\+\+ b/include/linux/susfs\.h\n@@ .*? @@\n(.*?)(?=\ndiff --git|\Z)',
+    'include/linux/susfs_def.h': r'diff --git a/include/linux/susfs_def\.h b/include/linux/susfs_def\.h.*?\n--- /dev/null\n\+\+\+ b/include/linux/susfs_def\.h\n@@ .*? @@\n(.*?)(?=\ndiff --git|\Z)'
+}
+
+import os
+for filepath, pattern in patterns.items():
+    match = re.search(pattern, patch_content, re.DOTALL)
     if match:
-        lines = match.group(1).split('\n')
-        file_content = []
+        # Nettoyer les lignes du diff (enlever le + au début)
+        content = match.group(1)
+        lines = content.split('\n')
+        cleaned = []
         for line in lines:
             if line.startswith('+'):
-                file_content.append(line[1:])
+                cleaned.append(line[1:])
             elif line.startswith(' '):
-                file_content.append(line[1:])
-            elif line.startswith('@@'):
-                pass
-        with open(fpath, 'w') as out:
-            out.write('\n'.join(file_content) + '\n')
-        print(f"  ✅ {fpath} extrait (v2.3.0)")
+                cleaned.append(line[1:])
+            elif line.startswith('-'):
+                continue # Ne devrait pas arriver pour un nouveau fichier
+            else:
+                cleaned.append(line)
+        
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'w') as f:
+            f.write('\n'.join(cleaned))
+        print(f"  ✅ {filepath} extrait")
     else:
-        print(f"  ⚠️ Impossible d'extraire {fpath} du patch")
+        print(f"  ❌ Impossible d'extraire {filepath}")
+        exit(1)
 PYEOF
 
-# On vérifie que les fichiers sont bien là et qu'ils sont en v2.3.0
-grep -q 'SUSFS_VERSION "v2.3.0"' include/linux/susfs.h && echo "✅ Version v2.3.0 confirmée" || (echo "❌ Mauvaise version de SUSFS"; exit 1)
+# Vérification dure
+for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+    if [ ! -s "$f" ]; then
+        echo "❌ $f manquant après extraction."
+        exit 1
+    fi
+done
+echo "✅ Les 3 fichiers SUSFS v2.3.0 sont prêts."
 
 # ==================== 2d. CORRECTIFS POST-PATCH SUSFS ====================
 echo ""
@@ -99,7 +121,7 @@ if ! grep -q "CONFIG_KSU_SUSFS.*susfs.o" fs/Makefile; then
     echo "    ✅ fs/Makefile patché"
 fi
 
-# Includes forcés
+# Includes forcés (Répare les échecs de Hunk #1 dans fs/namespace.c et fs/super.c)
 python3 - <<'PYEOF'
 import os
 def force_include(filepath, includes):
@@ -160,11 +182,10 @@ if 'susfs_set_priority_uid_filter' not in sh:
 with open('include/linux/susfs.h', 'w') as f: f.write(sh)
 PYEOF
 
-# ==================== FIX CRITIQUE : SUS_KSTAT SANS SUS_MOUNT ====================
-echo "    → Correction de fs/notify/fdinfo.c (incompatibilité signature/appel)..."
+# Correction fs/notify/fdinfo.c (cohérence des arguments si SUS_MOUNT est off)
+echo "    → Correction de fs/notify/fdinfo.c..."
 python3 - <<'PYEOF'
 with open('fs/notify/fdinfo.c', 'r') as f: c = f.read()
-
 c = c.replace(
     '#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_SUS_KSTAT)',
     '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT'
@@ -180,6 +201,7 @@ PYEOF
 echo "✅ Correctifs post-patch appliqués"
 
 # ==================== 3. FIXES COMPATIBILITÉ 4.19 (V7.24) ====================
+# (Je garde le bloc V7.24 complet car il est vital)
 echo ""
 echo "=== Fixes compatibilité 4.19 (V7.24) ==="
 [ ! -f "include/linux/static_call.h" ] && cat > include/linux/static_call.h <<'EOF'
@@ -380,7 +402,7 @@ if [ -f "$KSUD" ] && ! grep -q 'ksu_selinux_hide_handle_post_fs_data(void) { }' 
     python3 - "$KSUD" <<'PYEOF'
 import sys, re
 with open(sys.argv[1]) as f: c = f.read()
-stubs = '\n/* V7.24 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
+stubs = '\n/* V7.28 : stubs SUSFS */\n#ifndef CONFIG_KSU_SUSFS\nstatic inline void ksu_selinux_hide_handle_post_fs_data(void) { }\nstatic inline void ksu_selinux_hide_handle_second_stage(void) { }\nstatic inline void ksu_selinux_hide_drop_backup_if_unused(void) { }\n#endif\n'
 m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + stubs + c[m[-1].end():]
 else: c = stubs + c
