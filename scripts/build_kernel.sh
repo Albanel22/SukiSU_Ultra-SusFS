@@ -4,9 +4,10 @@ set -euo pipefail
 # =============================================================================
 # V7.28 : SukiSU-Ultra builtin — V7.24 + SUSFS v2.3.0 (Partiel & Stable)
 # V7.28.1 : Correctif kernel_compat.h (infra/) + diagnostic patches
+# V7.28.2 : Correctif symlink drivers/kernelsu (find -L + fallback [ -f ])
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.28.1 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.28.2 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -34,6 +35,11 @@ rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 [ ! -d "drivers/kernelsu" ] && echo "❌" && exit 1
 echo "✅ intégré"
+
+# Diagnostic symlink dès l'intégration
+if [ -L "drivers/kernelsu" ]; then
+    echo "ℹ️  drivers/kernelsu est un symlink → $(readlink -f drivers/kernelsu)"
+fi
 
 # ==================== 2b. TÉLÉCHARGEMENT ET APPLICATION DES PATCHS ====================
 echo ""
@@ -75,7 +81,7 @@ SUSFS_PATCH_RC=$?
 set -e
 if [ "$SUSFS_PATCH_RC" -ne 0 ]; then
     echo "⚠️  susfs_patch_to_4.19.patch : hunks en échec (rc=$SUSFS_PATCH_RC)"
-    find . -maxdepth 3 -name '*.rej' 2>/dev/null | head -10 || true
+    find -L . -maxdepth 3 -name '*.rej' 2>/dev/null | head -10 || true
 fi
 
 # ==================== 2c. EXTRACTION DES FICHIERS SUSFS v2.3.0 ====================
@@ -315,7 +321,7 @@ PYEOF
 [ -f "drivers/kernelsu/sulog/event.c" ] && sed -i 's|#include <linux/minmax.h>|#include <linux/kernel.h>|' drivers/kernelsu/sulog/event.c
 [ -f "drivers/kernelsu/preinit/common/preinit.h" ] && sed -i 's|^#define KSU_NO_PREINIT$|#define KSU_NO_PREINIT 1|' drivers/kernelsu/preinit/common/preinit.h
 
-find drivers/kernelsu/sulog \( -name '*.c' -o -name '*.h' \) 2>/dev/null | while read f; do
+find -L drivers/kernelsu/sulog \( -name '*.c' -o -name '*.h' \) 2>/dev/null | while read f; do
     sed -i 's|#define USER_ARG_NULL user_arg_null_ptr()|#define USER_ARG_NULL (*user_arg_null_ptr())|' "$f"
 done
 
@@ -507,19 +513,45 @@ if 'ksu_handle_stat' not in c:
 PYEOF
 fi
 
-# ==================== 5b. NORMALISATION kernel_compat.h (CORRECTIF V7.28.1) ====================
+# ==================== 5b. NORMALISATION kernel_compat.h (CORRECTIF V7.28.2) ====================
 echo ""
 echo "=== Normalisation kernel_compat.h ==="
 
-COMPAT_REAL="$(find drivers/kernelsu -name kernel_compat.h -type f 2>/dev/null | head -1)"
+# Diagnostic : détecte les symlinks
+echo "  → Diagnostic :"
+echo "     pwd = $(pwd)"
+if [ -L "drivers/kernelsu" ]; then
+    echo "     ⚠️  drivers/kernelsu EST UN SYMLINK → $(readlink -f drivers/kernelsu)"
+    echo "     (ceci explique pourquoi 'find' sans -L échoue)"
+fi
+
+# Recherche robuste : [ -f ] d'abord (suit les symlinks), find -L en fallback
+COMPAT_REAL=""
+for candidate in \
+    drivers/kernelsu/kernel_compat.h \
+    drivers/kernelsu/infra/kernel_compat.h ; do
+    if [ -f "$candidate" ]; then
+        COMPAT_REAL="$candidate"
+        break
+    fi
+done
+
+if [ -z "$COMPAT_REAL" ]; then
+    # Fallback find -L (suit les symlinks)
+    set +e
+    COMPAT_REAL="$(find -L drivers/kernelsu -name kernel_compat.h -type f 2>/dev/null | head -1)"
+    set -e
+fi
+
 if [ -z "$COMPAT_REAL" ]; then
     echo "❌ kernel_compat.h introuvable dans drivers/kernelsu/"
-    echo "   → Le patch sukisu_ultra_fixed.patch a probablement échoué."
-    ls -la drivers/kernelsu/ || true
-    find drivers/kernelsu -name '*.h' | head -20 || true
+    echo "   Diagnostic supplémentaire :"
+    ls -ld drivers/kernelsu 2>&1 || true
+    ls -la drivers/kernelsu/ 2>&1 | head -30 || true
+    find -L drivers/kernelsu -name '*.h' 2>/dev/null | head -20 || true
     exit 1
 fi
-echo "  Source trouvée : $COMPAT_REAL"
+echo "  ✅ Source trouvée : $COMPAT_REAL"
 
 # Ajouter le macro ksu_access_ok si absent
 if ! grep -q 'define ksu_access_ok' "$COMPAT_REAL"; then
@@ -531,10 +563,10 @@ m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
 if m: c = c[:m[-1].end()] + macro + c[m[-1].end():]
 with open(sys.argv[1], 'w') as f: f.write(c)
 PYEOF
-    echo "  ✅ macro ksu_access_ok ajouté à $COMPAT_REAL"
+    echo "  ✅ macro ksu_access_ok ajouté"
 fi
 
-# Rendre le fichier disponible aux DEUX emplacements
+# S'assurer que le fichier existe aux DEUX emplacements (racine + infra/)
 mkdir -p drivers/kernelsu/infra
 for target in \
     drivers/kernelsu/kernel_compat.h \
@@ -552,15 +584,42 @@ if [ -f "$KSU_MK" ] && ! grep -qE '^\s*ccflags-y\s*\+=\s*-I' "$KSU_MK"; then
     echo "  ✅ ajouté -I\$(srctree)/\$(src) à $KSU_MK"
 fi
 
-# Fix générique : tout #include "infra/xxx.h" qui pointe vers un fichier
-# présent à la racine de drivers/kernelsu/ → on le copie sous infra/
-for inc in $(grep -rhoP '(?<=#include\s")infra/[^"]+(?=")' drivers/kernelsu 2>/dev/null | sort -u); do
-    src="drivers/kernelsu/${inc#infra/}"
-    dst="drivers/kernelsu/$inc"
-    if [ ! -f "$dst" ] && [ -f "$src" ]; then
+# Fix hardcodé : liste connue de fichiers infra/ (indépendant de find/grep)
+echo "  → Copie des fichiers infra/ connus..."
+for base in kernel_compat.h kernel_includes.h file_wrapper.c file_wrapper.h \
+            seccomp_cache.c seccomp_cache.h su_mount_ns.c dispatch.c ; do
+    src="drivers/kernelsu/$base"
+    dst="drivers/kernelsu/infra/$base"
+    if [ -f "$src" ] && [ ! -f "$dst" ]; then
         mkdir -p "$(dirname "$dst")"
         cp "$src" "$dst"
-        echo "  ✅ infra fix: $inc"
+        echo "     ✅ infra/$base"
+    fi
+done
+
+# Catch-all via grep -r (si find/grep fonctionnent, sinon ignoré)
+set +e
+INFRA_INCS=$(grep -rhoP '(?<=#include\s")infra/[^"]+(?=")' drivers/kernelsu 2>/dev/null | sort -u)
+set -e
+if [ -n "${INFRA_INCS:-}" ]; then
+    for inc in $INFRA_INCS; do
+        src="drivers/kernelsu/${inc#infra/}"
+        dst="drivers/kernelsu/$inc"
+        if [ ! -f "$dst" ] && [ -f "$src" ]; then
+            mkdir -p "$(dirname "$dst")"
+            cp "$src" "$dst"
+            echo "     ✅ infra fix (grep): $inc"
+        fi
+    done
+fi
+
+# Vérification finale
+for f in drivers/kernelsu/kernel_compat.h drivers/kernelsu/infra/kernel_compat.h; do
+    if [ -f "$f" ]; then
+        echo "  ✔ $f présent ($(stat -c%s "$f") octets)"
+    else
+        echo "  ❌ $f MANQUANT après normalisation"
+        exit 1
     fi
 done
 
@@ -630,7 +689,7 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f "out/arch/arm64/boot/Image" ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.28.1) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.28.2) ✅✅✅"
 
 # ==================== 9. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
@@ -657,7 +716,7 @@ rm -rf "$GITHUB_WORKSPACE/ksud-src"
 git clone --depth=1 --branch builtin https://github.com/ShirkNeko/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src" || true
 
 KSUD_OK=0
-KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -name 'Cargo.toml' -type f 2>/dev/null | while read cargo; do
+KSUD_DIR=$(find -L "$GITHUB_WORKSPACE/ksud-src" -name 'Cargo.toml' -type f 2>/dev/null | while read cargo; do
     if grep -qE 'name\s*=\s*"ksud"' "$cargo" 2>/dev/null; then dirname "$cargo"; break; fi
 done | head -1)
 
@@ -679,7 +738,7 @@ EOF
     CARGO_RC=${PIPESTATUS[0]}
     set -eo pipefail
     if [ "$CARGO_RC" -eq 0 ]; then
-        KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
+        KSUD_BINARY=$(find -L "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
         if [ -n "$KSUD_BINARY" ]; then
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/output/ksud-v7.28"
             cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
@@ -739,5 +798,5 @@ set -e
 
 # ==================== 12. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v7.28.1 ==="
+echo "=== BUILD TERMINÉ v7.28.2 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
