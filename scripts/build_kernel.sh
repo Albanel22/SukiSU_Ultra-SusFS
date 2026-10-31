@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.30 : SukiSU-Ultra builtin + SUSFS v2.3.0 (fix kfree_rcu NULL — 16cb19c)
+# V7.32 : SukiSU-Ultra builtin + SUSFS v2.3.0 (fix kfree_rcu NULL — 16cb19c)
 #         Méthode JackA1ltman / NonGKI_Kernel_Build_2nd / mainline
+#         + affichage des .rej dans le log GitHub Actions pour résolution manuelle
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.30 (JackA1ltman) ==="
+echo "=== Build SukiSU-Ultra builtin — V7.32 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -34,7 +35,7 @@ cd kernel_sources
 git log --oneline -1
 
 # -----------------------------------------------------------------------------
-# 2. SukiSU-Ultra builtin (ShirkNeko)
+# 2. SukiSU-Ultra builtin
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== SukiSU-Ultra builtin ==="
@@ -47,10 +48,11 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 echo "✅ SukiSU-Ultra intégré"
 
 # -----------------------------------------------------------------------------
-# 2b. Patch SUSFS 4.19 — JackA1ltman (version 16cb19c, fix kfree_rcu NULL)
+# 2b. Patch SUSFS 4.19 — JackA1ltman
+#     Si échec : affiche le log + les .rej pour résolution manuelle
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== Patch SUSFS 4.19 (JackA1ltman, fix kfree_rcu) ==="
+echo "=== Patch SUSFS 4.19 (JackA1ltman) ==="
 BASE_JACK="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches"
 
 SUSFS_PATCH="/tmp/susfs_patch_to_4.19.patch"
@@ -59,31 +61,49 @@ curl -LSsf "$BASE_JACK/Patch/susfs_patch_to_4.19.patch" -o "$SUSFS_PATCH" \
 [ -s "$SUSFS_PATCH" ] || { echo "❌ patch SUSFS vide"; exit 1; }
 
 if patch -p1 --forward --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; then
+    echo "  → Application du patch SUSFS…"
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 \
       || { echo "❌ patch SUSFS a échoué"; cat /tmp/susfs_patch.log; exit 1; }
     echo "  ✅ patch SUSFS appliqué"
 elif patch -p1 --reverse --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; then
-    echo "  ↻ patch SUSFS déjà appliqué"
+    echo "  ↻ patch SUSFS déjà appliqué (skip)"
 else
     echo "❌ patch SUSFS ni applicable ni déjà appliqué"
-    patch -p1 --forward --reject-file=- < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 || true
-    grep -E '^Hunk|^FAILED|^Reversed' /tmp/susfs_patch.log | head -10 || true
+    echo ""
+    echo "=== Application réelle pour générer les .rej ==="
+    patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 || true
+
+    echo ""
+    echo "=== Log du patch (40 dernières lignes) ==="
+    tail -40 /tmp/susfs_patch.log || true
+
+    echo ""
+    echo "=== Fichiers .rej générés ==="
+    for f in $(find . -name "*.rej"); do
+        echo "========================================"
+        echo "FICHIER REJETÉ : $f"
+        echo "========================================"
+        cat "$f"
+        echo ""
+    done
+    echo "=== Fin des .rej ==="
     exit 1
 fi
 
 # Vérification fichiers SUSFS
 for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
-    [ -s "$f" ] || { echo "❌ $f manquant"; exit 1; }
+    [ -s "$f" ] || { echo "❌ $f manquant après patch"; exit 1; }
 done
 echo "  ✅ fichiers SUSFS présents"
 
 # susfs.o dans fs/Makefile (si absent)
 if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
     echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+    echo "  ✅ susfs.o ajouté à fs/Makefile"
 fi
 
 # -----------------------------------------------------------------------------
-# 3. Hooks inline — MÉTHODE JACKA1LTMAN
+# 3. Hooks inline — susfs_inline_hook_patches.sh (JackA1ltman)
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Hooks inline (susfs_inline_hook_patches.sh) ==="
@@ -173,14 +193,14 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.30) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.32) ✅✅✅"
 
 # -----------------------------------------------------------------------------
 # 7. Sauvegarde
 # -----------------------------------------------------------------------------
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.30-susfs"
-[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.30-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.32-susfs"
+[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.32-susfs"
 
 # -----------------------------------------------------------------------------
 # 8. Repack
@@ -209,7 +229,7 @@ cd repack
 ./magiskboot unpack boot.img
 cp "$GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image" kernel
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.30-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.32-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 
@@ -217,5 +237,5 @@ echo "✅ boot.img repacké"
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.30 ==="
+echo "=== BUILD TERMINÉ v7.32 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
