@@ -2,16 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.36 : SukiSU-Ultra builtin + SUSFS v2.3.0
-#         - injection manuelle des hunks fs/namespace.c
-#         - DEFAULT_KSU_MNT_ID ajouté
-#         - stub linux/static_call.h pour 4.19
-#         - correction inotify_fdinfo (3 args)
-#         - correction cpu_spoof.c (vdso_clock_mode)
-#         - correction kpm.c (access_ok)
+# V7.38 : SukiSU-Ultra builtin + SUSFS v2.3.0
+#         - Compilation de ksud et injection dans le ramdisk
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.36 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.38 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -225,69 +220,47 @@ bash "$HOOK_SCRIPT" || { echo "❌ injection hooks échouée"; exit 1; }
 echo "✅ hooks injectés"
 
 # -----------------------------------------------------------------------------
-# 3b. Correction fs/notify/fdinfo.c (inotify_fdinfo 3 args)
+# 3b. Corrections de compatibilité
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== Correction fs/notify/fdinfo.c (signature inotify_fdinfo) ==="
+echo "=== Corrections de compatibilité 4.19 ==="
+
+# --- fdinfo.c ---
 python3 - <<'PYEOF'
 import re, sys
-
 path = 'fs/notify/fdinfo.c'
 with open(path) as f:
     c = f.read()
-
 if 'SUSFS_FDINFO_3ARGS_FIX' in c:
-    print("  ↻ fs/notify/fdinfo.c : déjà corrigé, skip")
-    sys.exit(0)
-
+    print("  ↻ fs/notify/fdinfo.c : déjà corrigé"); sys.exit(0)
 pattern = r'static\s+void\s+inotify_fdinfo\s*\(\s*struct\s+seq_file\s*\*\s*(\w+)\s*,\s*struct\s+fsnotify_mark\s*\*\s*(\w+)\s*\)'
 match = re.search(pattern, c)
 if not match:
-    print("  ⚠️ inotify_fdinfo pattern introuvable, skip")
-    sys.exit(0)
-
-m_name = match.group(1)
-mark_name = match.group(2)
-
+    print("  ⚠️ inotify_fdinfo pattern introuvable"); sys.exit(0)
+m_name, mark_name = match.group(1), match.group(2)
 new_sig = f'static void inotify_fdinfo(struct seq_file *{m_name}, struct fsnotify_mark *{mark_name}, struct file *f)'
 c = c[:match.start()] + new_sig + c[match.end():]
-
 c = '/* SUSFS_FDINFO_3ARGS_FIX : inotify_fdinfo accepte 3 args pour show_fdinfo */\n' + c
-
 with open(path, 'w') as f:
     f.write(c)
 print("  ✅ fs/notify/fdinfo.c : inotify_fdinfo corrigée (3 args)")
 PYEOF
 
-# -----------------------------------------------------------------------------
-# 3c. Correction cpu_spoof.c (vdso_clock_mode)
-# -----------------------------------------------------------------------------
-echo ""
-echo "=== Correction cpu_spoof.c (vdso_clock_mode) ==="
+# --- cpu_spoof.c ---
 python3 - <<'PYEOF'
 import re, sys
-
 path = 'drivers/kernelsu/extension/cpu_spoof.c'
 try:
-    with open(path) as f:
-        c = f.read()
+    with open(path) as f: c = f.read()
 except FileNotFoundError:
-    print("  ⚠️ cpu_spoof.c introuvable, skip")
-    sys.exit(0)
-
+    print("  ⚠️ cpu_spoof.c introuvable"); sys.exit(0)
 if 'CPU_SPOOF_VDSO_FIX' in c:
-    print("  ↻ cpu_spoof.c : déjà corrigé, skip")
-    sys.exit(0)
-
+    print("  ↻ cpu_spoof.c : déjà corrigé"); sys.exit(0)
 pattern = r'(\s*)(\(\*curr_cs_ptr\)->vdso_clock_mode\s*=\s*[^;]+;)'
 match = re.search(pattern, c)
 if not match:
-    print("  ⚠️ vdso_clock_mode pattern introuvable, skip")
-    sys.exit(0)
-
-indent = match.group(1)
-stmt = match.group(2)
-
+    print("  ⚠️ vdso_clock_mode pattern introuvable"); sys.exit(0)
+indent, stmt = match.group(1), match.group(2)
 new_block = f'''
 {indent}/* CPU_SPOOF_VDSO_FIX : vdso_clock_mode n'existe pas sur 4.19 */
 {indent}#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
@@ -295,29 +268,18 @@ new_block = f'''
 {indent}#endif
 '''
 c = c[:match.start()] + new_block + c[match.end():]
-
-with open(path, 'w') as f:
-    f.write(c)
+with open(path, 'w') as f: f.write(c)
 print("  ✅ cpu_spoof.c : vdso_clock_mode protégé")
 PYEOF
 
-# -----------------------------------------------------------------------------
-# 3d. Correction kpm.c (access_ok)
-# -----------------------------------------------------------------------------
-echo ""
-echo "=== Correction kpm.c (access_ok 2 args vs 3 args) ==="
+# --- kpm.c ---
 python3 - <<'PYEOF'
 import re, sys
-
-# 1. Ajouter le wrapper dans kernel_compat.h
 compat_path = 'drivers/kernelsu/kernel_compat.h'
 try:
-    with open(compat_path) as f:
-        compat = f.read()
+    with open(compat_path) as f: compat = f.read()
 except FileNotFoundError:
-    print("  ⚠️ kernel_compat.h introuvable, skip")
-    sys.exit(0)
-
+    print("  ⚠️ kernel_compat.h introuvable"); sys.exit(0)
 if 'KSU_ACCESS_OK_FIX' not in compat:
     wrapper = '''
 /* KSU_ACCESS_OK_FIX : access_ok sur 4.19 ARM64 attend 3 args */
@@ -332,28 +294,19 @@ if 'KSU_ACCESS_OK_FIX' not in compat:
         compat = compat[:includes[-1].end()] + wrapper + compat[includes[-1].end():]
     else:
         compat = wrapper + compat
-    with open(compat_path, 'w') as f:
-        f.write(compat)
+    with open(compat_path, 'w') as f: f.write(compat)
     print("  ✅ kernel_compat.h : ksu_access_ok ajouté")
-
-# 2. Remplacer access_ok par ksu_access_ok dans kpm.c
 kpm_path = 'drivers/kernelsu/extension/kpm/kpm.c'
 try:
-    with open(kpm_path) as f:
-        kpm = f.read()
+    with open(kpm_path) as f: kpm = f.read()
 except FileNotFoundError:
-    print("  ⚠️ kpm.c introuvable, skip")
-    sys.exit(0)
-
-if 'ksu_access_ok' in kpm:
-    print("  ↻ kpm.c : déjà corrigé, skip")
-    sys.exit(0)
-
-kpm = re.sub(r'(?<!ksu_)access_ok\s*\(', 'ksu_access_ok(', kpm)
-
-with open(kpm_path, 'w') as f:
-    f.write(kpm)
-print("  ✅ kpm.c : access_ok → ksu_access_ok")
+    print("  ⚠️ kpm.c introuvable"); sys.exit(0)
+if 'ksu_access_ok' not in kpm:
+    kpm = re.sub(r'(?<!ksu_)access_ok\s*\(', 'ksu_access_ok(', kpm)
+    with open(kpm_path, 'w') as f: f.write(kpm)
+    print("  ✅ kpm.c : access_ok → ksu_access_ok")
+else:
+    print("  ↻ kpm.c : déjà corrigé")
 PYEOF
 
 # -----------------------------------------------------------------------------
@@ -398,8 +351,17 @@ EOF
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   olddefconfig 2>&1 | tail -3
 
-for opt in CONFIG_KSU CONFIG_KSU_SUSFS \
-           CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_KSTAT; do
+# --- VÉRIFICATION STRICTE CONFIG_KSU ---
+echo "  → Vérification CONFIG_KSU dans .config final…"
+if ! grep -q '^CONFIG_KSU=y' out/.config; then
+    echo "❌ CONFIG_KSU n'est pas 'y' dans out/.config !"
+    echo "   Lignes CONFIG_KSU trouvées :"
+    grep 'CONFIG_KSU' out/.config || echo "   (aucune)"
+    exit 1
+fi
+echo "  ✅ CONFIG_KSU=y confirmé"
+
+for opt in CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_KSTAT; do
     grep -q "^${opt}=y" out/.config || { echo "❌ ${opt} droppé"; exit 1; }
 done
 echo "✅ config validée"
@@ -430,14 +392,95 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.36) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.38) ✅✅✅"
+
+# -----------------------------------------------------------------------------
+# 6b. VÉRIFICATION STRICTE DES SYMBOLES KSU DANS LE NOYAU
+# -----------------------------------------------------------------------------
+echo ""
+echo "=== Vérification des symboles ksu_handle_* dans System.map ==="
+if [ ! -f out/System.map ]; then
+    echo "❌ out/System.map absent"
+    exit 1
+fi
+KSU_SYMS=$(grep -E 'ksu_handle_execveat|ksu_handle_stat|ksu_handle_faccessat|ksu_handle_vfs_read' out/System.map || true)
+if [ -z "$KSU_SYMS" ]; then
+    echo "❌ Aucun symbole ksu_handle_* trouvé dans System.map"
+    echo "   → Les hooks n'ont pas été compilés. Causes possibles :"
+    echo "     - CONFIG_KSU n'était pas actif pendant la compilation"
+    echo "     - Les hooks ont été injectés dans des fichiers non compilés"
+    echo "   → Lignes CONFIG_KSU dans .config :"
+    grep 'CONFIG_KSU' out/.config
+    exit 1
+fi
+echo "✅ Symboles KSU trouvés :"
+echo "$KSU_SYMS" | head -10
 
 # -----------------------------------------------------------------------------
 # 7. Sauvegarde
 # -----------------------------------------------------------------------------
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.36-susfs"
-[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.36-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.38-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.38-susfs"
+
+# -----------------------------------------------------------------------------
+# 7b. Compilation et injection de ksud dans le ramdisk
+# -----------------------------------------------------------------------------
+echo ""
+echo "=== Compilation ksud ==="
+cd "$GITHUB_WORKSPACE"
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly 2>&1 | tail -3 || true
+source "$HOME/.cargo/env" || true
+[ -x "$HOME/.cargo/bin/cargo" ] || { echo "❌ cargo absent — ksud ne sera pas compilé"; }
+
+if [ -x "$HOME/.cargo/bin/cargo" ]; then
+    rustup target add aarch64-linux-android 2>&1 | tail -2 || true
+
+    wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip || true
+    unzip -q android-ndk-r26d-linux.zip || true
+    export ANDROID_NDK_ROOT="$GITHUB_WORKSPACE/android-ndk-r26d"
+    export AARCH64_CLANG_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+    export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
+    export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+
+    rm -rf "$GITHUB_WORKSPACE/ksud-src"
+    git clone --depth=1 --branch builtin https://github.com/ShirkNeko/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+
+    KSUD_DIR=$(find "$GITHUB_WORKSPACE/ksud-src" -name 'Cargo.toml' -type f 2>/dev/null | while read cargo; do
+        if grep -qE 'name\s*=\s*"ksud"' "$cargo" 2>/dev/null; then dirname "$cargo"; break; fi
+    done | head -1)
+
+    if [ -n "$KSUD_DIR" ]; then
+        (
+            cd "$KSUD_DIR"
+            mkdir -p .cargo
+            cat > .cargo/config.toml <<EOF
+[target.aarch64-linux-android]
+linker = "$AARCH64_CLANG_PATH"
+[env]
+CC_aarch64_linux_android = "$AARCH64_CLANG_PATH"
+CXX_aarch64_linux_android = "$AARCH64_CLANGXX_PATH"
+AR_aarch64_linux_android = "$AR_PATH"
+EOF
+            export CARGO_NET_GIT_FETCH_WITH_CLI=true
+            cargo build --release --target aarch64-linux-android 2>&1 | tail -10
+        ) || true
+    fi
+fi
+
+KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1)
+if [ -z "$KSUD_BINARY" ]; then
+    echo "⚠️ ksud non compilé — le manager ne détectera probablement pas le noyau"
+    KSUD_OK=0
+else
+    cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"
+    chmod 755 "$GITHUB_WORKSPACE/ksud"
+    KSUD_OK=1
+    echo "✅ ksud compilé"
+fi
+
+cd "$GITHUB_WORKSPACE"
 
 # -----------------------------------------------------------------------------
 # 8. Repack
@@ -465,8 +508,24 @@ rm -rf Magisk-v27.0.apk lib
 cd repack
 ./magiskboot unpack boot.img
 cp "$GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image" kernel
+
+# Injection de ksud dans le ramdisk
+if [ "${KSUD_OK:-0}" = "1" ] && [ -f "$GITHUB_WORKSPACE/ksud" ]; then
+    ./magiskboot cpio ramdisk.cpio \
+        "mkdir 0755 data" "mkdir 0755 data/adb" "mkdir 0755 data/adb/ksud" \
+        "add 0755 data/adb/ksud/ksud $GITHUB_WORKSPACE/ksud"
+    cp "$GITHUB_WORKSPACE/ksud" ./local_su_binary; chmod 755 ./local_su_binary
+    ./magiskboot cpio ramdisk.cpio \
+        "mkdir 0755 system" "mkdir 0755 system/bin" \
+        "add 06755 system/bin/su ./local_su_binary"
+    rm -f ./local_su_binary
+    echo "✅ ksud + su injectés dans le ramdisk"
+else
+    echo "⚠️ Repack SANS ksud — le manager ne détectera probablement pas le noyau"
+fi
+
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.36-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.38-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 
@@ -474,5 +533,5 @@ echo "✅ boot.img repacké"
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.36 ==="
+echo "=== BUILD TERMINÉ v7.38 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
