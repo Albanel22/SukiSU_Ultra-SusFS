@@ -2,12 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.32 : SukiSU-Ultra builtin + SUSFS v2.3.0 (fix kfree_rcu NULL — 16cb19c)
-#         Méthode JackA1ltman / NonGKI_Kernel_Build_2nd / mainline
-#         + affichage des .rej dans le log GitHub Actions pour résolution manuelle
+# V7.33 : SukiSU-Ultra builtin + SUSFS v2.3.0
+#         + injection automatique des hunks rejetés de fs/namespace.c
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.32 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.33 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -48,8 +47,7 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 echo "✅ SukiSU-Ultra intégré"
 
 # -----------------------------------------------------------------------------
-# 2b. Patch SUSFS 4.19 — JackA1ltman
-#     Si échec : affiche le log + les .rej pour résolution manuelle
+# 2b. Patch SUSFS 4.19 — avec gestion des rejets
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Patch SUSFS 4.19 (JackA1ltman) ==="
@@ -60,35 +58,109 @@ curl -LSsf "$BASE_JACK/Patch/susfs_patch_to_4.19.patch" -o "$SUSFS_PATCH" \
   || { echo "❌ download patch SUSFS échoué"; exit 1; }
 [ -s "$SUSFS_PATCH" ] || { echo "❌ patch SUSFS vide"; exit 1; }
 
+# On tente le patch, mais on ne s'arrête PAS en cas d'échec.
+# On applique les rejets manuellement ensuite.
 if patch -p1 --forward --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; then
     echo "  → Application du patch SUSFS…"
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 \
       || { echo "❌ patch SUSFS a échoué"; cat /tmp/susfs_patch.log; exit 1; }
     echo "  ✅ patch SUSFS appliqué"
-elif patch -p1 --reverse --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; then
-    echo "  ↻ patch SUSFS déjà appliqué (skip)"
 else
-    echo "❌ patch SUSFS ni applicable ni déjà appliqué"
-    echo ""
-    echo "=== Application réelle pour générer les .rej ==="
+    echo "  ⚠️ Patch SUSFS partiellement rejeté — application puis correction manuelle"
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 || true
 
-    echo ""
-    echo "=== Log du patch (40 dernières lignes) ==="
-    tail -40 /tmp/susfs_patch.log || true
+    # --- Injection manuelle des blocs rejetés dans fs/namespace.c
+    echo "  → Injection des hunks rejetés dans fs/namespace.c…"
+    python3 - <<'PYEOF'
+import re, sys
 
-    echo ""
-    echo "=== Fichiers .rej générés ==="
-    for f in $(find . -name "*.rej"); do
-        echo "========================================"
-        echo "FICHIER REJETÉ : $f"
-        echo "========================================"
-        cat "$f"
-        echo ""
-    done
-    echo "=== Fin des .rej ==="
-    exit 1
+path = 'fs/namespace.c'
+with open(path) as f:
+    c = f.read()
+
+# Vérifie si déjà injecté (idempotent)
+if 'susfs_is_current_ksu_domain' in c:
+    print("  ↻ fs/namespace.c : blocs SUSFS déjà présents, skip")
+    sys.exit(0)
+
+# --- Bloc 1 : includes et déclarations après "internal.h"
+anchor1 = '#include "internal.h"\n'
+if anchor1 not in c:
+    print(f"  ❌ anchor1 introuvable : {anchor1!r}")
+    sys.exit(1)
+
+bloc1 = '''
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#endif // #ifdef CONFIG_KSU_SUSFS
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_is_current_ksu_domain(void);
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+
+#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */
+
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+
+'''
+# Insère juste après #include "internal.h"
+c = c.replace(anchor1, anchor1 + bloc1, 1)
+
+# --- Bloc 2 : hook dans vfs_kern_mount
+# Cherche la fonction vfs_kern_mount et le début de son corps
+# On cible la ligne "if (!type)" dans vfs_kern_mount
+pattern = r'(struct vfsmount \*vfs_kern_mount\([^)]*\)\s*\{.*?if \(!type\)\s*\n\s*return ERR_PTR\(-EINVAL\);\s*\n)'
+match = re.search(pattern, c, re.DOTALL)
+if not match:
+    print("  ❌ vfs_kern_mount pattern introuvable")
+    sys.exit(1)
+
+bloc2 = '''
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	// - We will just stop checking for ksu process if /sdcard/Android is accessible,
+	//   for the sake of performance
+	if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {
+		if (susfs_is_current_ksu_domain()) {
+			mnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ?:"none");
+			goto bypass_orig_flow;
+		}
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+
+'''
+# Insère après le bloc "if (!type) return ..."
+c = c[:match.end()] + bloc2 + c[match.end():]
+
+# Ajoute le label "bypass_orig_flow:" juste avant "if (!mnt)"
+# On cherche la ligne "mnt = alloc_vfsmnt(name);" qui suit
+pattern2 = r'(mnt = alloc_vfsmnt\(name\);\s*\n)'
+match2 = re.search(pattern2, c)
+if not match2:
+    print("  ❌ alloc_vfsmnt pattern introuvable")
+    sys.exit(1)
+
+label = '''
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+bypass_orig_flow:
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+'''
+c = c[:match2.end()] + label + c[match2.end():]
+
+with open(path, 'w') as f:
+    f.write(c)
+print("  ✅ fs/namespace.c : blocs SUSFS injectés manuellement")
+PYEOF
+
+    # Vérifie que l'injection a réussi
+    if ! grep -q "susfs_is_current_ksu_domain" fs/namespace.c; then
+        echo "❌ L'injection manuelle dans fs/namespace.c a échoué"
+        exit 1
+    fi
+    echo "  ✅ fs/namespace.c corrigé"
 fi
+
+# Nettoyage des .rej
+find . -name "*.rej" -delete 2>/dev/null || true
 
 # Vérification fichiers SUSFS
 for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
@@ -96,14 +168,14 @@ for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
 done
 echo "  ✅ fichiers SUSFS présents"
 
-# susfs.o dans fs/Makefile (si absent)
+# susfs.o dans fs/Makefile
 if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
     echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
     echo "  ✅ susfs.o ajouté à fs/Makefile"
 fi
 
 # -----------------------------------------------------------------------------
-# 3. Hooks inline — susfs_inline_hook_patches.sh (JackA1ltman)
+# 3. Hooks inline — susfs_inline_hook_patches.sh
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Hooks inline (susfs_inline_hook_patches.sh) ==="
@@ -193,14 +265,14 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.32) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.33) ✅✅✅"
 
 # -----------------------------------------------------------------------------
 # 7. Sauvegarde
 # -----------------------------------------------------------------------------
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.32-susfs"
-[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.32-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.33-susfs"
+[ -f out/System.map ] && cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.33-susfs"
 
 # -----------------------------------------------------------------------------
 # 8. Repack
@@ -229,7 +301,7 @@ cd repack
 ./magiskboot unpack boot.img
 cp "$GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image" kernel
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.32-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.33-boot.img"
 cd "$GITHUB_WORKSPACE"
 echo "✅ boot.img repacké"
 
@@ -237,5 +309,5 @@ echo "✅ boot.img repacké"
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.32 ==="
+echo "=== BUILD TERMINÉ v7.33 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
