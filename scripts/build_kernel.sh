@@ -5,9 +5,10 @@ set -euo pipefail
 # V7.28 : SukiSU-Ultra builtin — V7.24 + SUSFS v2.3.0 (Partiel & Stable)
 # V7.28.1 : Correctif kernel_compat.h (infra/) + diagnostic patches
 # V7.28.2 : Correctif symlink drivers/kernelsu (find -L + fallback [ -f ])
+# V7.28.3 : Suppression du masquage des échecs (|| true retiré, exit sur .rej)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra builtin — V7.28.2 ==="
+echo "=== Build SukiSU-Ultra builtin — V7.28.3 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -36,12 +37,14 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 [ ! -d "drivers/kernelsu" ] && echo "❌" && exit 1
 echo "✅ intégré"
 
-# Diagnostic symlink dès l'intégration
 if [ -L "drivers/kernelsu" ]; then
     echo "ℹ️  drivers/kernelsu est un symlink → $(readlink -f drivers/kernelsu)"
 fi
 
 # ==================== 2b. TÉLÉCHARGEMENT ET APPLICATION DES PATCHS ====================
+# V7.28.3 : PLUS AUCUN || true, PLUS AUCUN set +e. Si un patch échoue,
+#           on dumpe les .rej et on s'arrête net. Objectif : identifier
+#           EXACTEMENT quel hunk n'est pas appliqué (cause probable du panic).
 echo ""
 echo "=== Téléchargement des patches de JackA1ltman ==="
 BASE_JACK="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch"
@@ -55,34 +58,66 @@ if [ ! -s /tmp/sukisu_fixed.patch ] || [ ! -s /tmp/susfs_4.19.patch ]; then
 fi
 echo "✅ Patches téléchargés."
 
-# --- Application du patch SukiSU (diagnostic amélioré) ---
+# --- Application du patch SukiSU (STRICT) ---
 echo ""
 echo "=== Application de sukisu_ultra_fixed.patch (dans drivers/kernelsu) ==="
 echo "  → Aperçu des chemins du patch :"
 head -3 /tmp/sukisu_fixed.patch | sed 's/^/     /'
+
+# Nettoyage préalable des .rej/.orig éventuels
+find -L drivers/kernelsu -name '*.rej' -delete 2>/dev/null || true
+find -L drivers/kernelsu -name '*.orig' -delete 2>/dev/null || true
+
 cd drivers/kernelsu
-set +e
-patch -p1 -t --forward < /tmp/sukisu_fixed.patch
-SUKISU_PATCH_RC=$?
-set -e
-if [ "$SUKISU_PATCH_RC" -ne 0 ]; then
-    echo "⚠️  sukisu_ultra_fixed.patch : hunks en échec (rc=$SUKISU_PATCH_RC)"
-    ls -la *.rej 2>/dev/null | head -10 || true
-else
-    echo "  ✅ patch SukiSU appliqué"
+if ! patch -p1 --forward --no-backup-if-mismatch < /tmp/sukisu_fixed.patch ; then
+    echo ""
+    echo "❌❌❌ ÉCHEC sukisu_ultra_fixed.patch ❌❌❌"
+    echo "Fichiers rejetés :"
+    find . -name '*.rej' 2>/dev/null | tee /tmp/sukisu_rejects.txt
+    echo ""
+    echo "=== Contenu des .rej ==="
+    while read -r rej; do
+        echo "--- $rej ---"
+        cat "$rej"
+        echo ""
+    done < /tmp/sukisu_rejects.txt
+    exit 1
 fi
 cd ../..
+echo "  ✅ patch SukiSU appliqué (aucun rejet)"
 
+# --- Application du patch SUSFS (STRICT) ---
 echo ""
 echo "=== Application de susfs_patch_to_4.19.patch (dans la racine) ==="
-set +e
-patch -p1 -t --forward < /tmp/susfs_4.19.patch
-SUSFS_PATCH_RC=$?
-set -e
-if [ "$SUSFS_PATCH_RC" -ne 0 ]; then
-    echo "⚠️  susfs_patch_to_4.19.patch : hunks en échec (rc=$SUSFS_PATCH_RC)"
-    find -L . -maxdepth 3 -name '*.rej' 2>/dev/null | head -10 || true
+find -L . -maxdepth 4 -name '*.rej' -delete 2>/dev/null || true
+find -L . -maxdepth 4 -name '*.orig' -delete 2>/dev/null || true
+
+if ! patch -p1 --forward --no-backup-if-mismatch < /tmp/susfs_4.19.patch ; then
+    echo ""
+    echo "❌❌❌ ÉCHEC susfs_patch_to_4.19.patch ❌❌❌"
+    echo "Fichiers rejetés :"
+    find -L . -maxdepth 4 -name '*.rej' 2>/dev/null | tee /tmp/susfs_rejects.txt
+    echo ""
+    echo "=== Contenu des .rej ==="
+    while read -r rej; do
+        echo "--- $rej ---"
+        cat "$rej"
+        echo ""
+    done < /tmp/susfs_rejects.txt
+    exit 1
 fi
+echo "  ✅ patch SUSFS appliqué (aucun rejet)"
+
+# --- Vérification finale : AUCUN .rej ne doit subsister ---
+echo ""
+echo "=== Vérification finale absence de .rej ==="
+REMAINING_REJ=$(find -L . -maxdepth 4 -name '*.rej' 2>/dev/null | wc -l)
+if [ "$REMAINING_REJ" -ne 0 ]; then
+    echo "❌ $REMAINING_REJ fichier(s) .rej résiduel(s) :"
+    find -L . -maxdepth 4 -name '*.rej'
+    exit 1
+fi
+echo "✅ Aucun .rej — patches intégralement appliqués"
 
 # ==================== 2c. EXTRACTION DES FICHIERS SUSFS v2.3.0 ====================
 echo ""
@@ -517,15 +552,12 @@ fi
 echo ""
 echo "=== Normalisation kernel_compat.h ==="
 
-# Diagnostic : détecte les symlinks
 echo "  → Diagnostic :"
 echo "     pwd = $(pwd)"
 if [ -L "drivers/kernelsu" ]; then
     echo "     ⚠️  drivers/kernelsu EST UN SYMLINK → $(readlink -f drivers/kernelsu)"
-    echo "     (ceci explique pourquoi 'find' sans -L échoue)"
 fi
 
-# Recherche robuste : [ -f ] d'abord (suit les symlinks), find -L en fallback
 COMPAT_REAL=""
 for candidate in \
     drivers/kernelsu/kernel_compat.h \
@@ -537,7 +569,6 @@ for candidate in \
 done
 
 if [ -z "$COMPAT_REAL" ]; then
-    # Fallback find -L (suit les symlinks)
     set +e
     COMPAT_REAL="$(find -L drivers/kernelsu -name kernel_compat.h -type f 2>/dev/null | head -1)"
     set -e
@@ -545,7 +576,6 @@ fi
 
 if [ -z "$COMPAT_REAL" ]; then
     echo "❌ kernel_compat.h introuvable dans drivers/kernelsu/"
-    echo "   Diagnostic supplémentaire :"
     ls -ld drivers/kernelsu 2>&1 || true
     ls -la drivers/kernelsu/ 2>&1 | head -30 || true
     find -L drivers/kernelsu -name '*.h' 2>/dev/null | head -20 || true
@@ -553,7 +583,6 @@ if [ -z "$COMPAT_REAL" ]; then
 fi
 echo "  ✅ Source trouvée : $COMPAT_REAL"
 
-# Ajouter le macro ksu_access_ok si absent
 if ! grep -q 'define ksu_access_ok' "$COMPAT_REAL"; then
     python3 - "$COMPAT_REAL" <<'PYEOF'
 import sys, re
@@ -566,7 +595,6 @@ PYEOF
     echo "  ✅ macro ksu_access_ok ajouté"
 fi
 
-# S'assurer que le fichier existe aux DEUX emplacements (racine + infra/)
 mkdir -p drivers/kernelsu/infra
 for target in \
     drivers/kernelsu/kernel_compat.h \
@@ -577,14 +605,12 @@ for target in \
     fi
 done
 
-# S'assurer que -I$(srctree)/$(src) est présent dans le Makefile de kernelsu
 KSU_MK="drivers/kernelsu/Makefile"
 if [ -f "$KSU_MK" ] && ! grep -qE '^\s*ccflags-y\s*\+=\s*-I' "$KSU_MK"; then
     echo 'ccflags-y += -I$(srctree)/$(src)' >> "$KSU_MK"
     echo "  ✅ ajouté -I\$(srctree)/\$(src) à $KSU_MK"
 fi
 
-# Fix hardcodé : liste connue de fichiers infra/ (indépendant de find/grep)
 echo "  → Copie des fichiers infra/ connus..."
 for base in kernel_compat.h kernel_includes.h file_wrapper.c file_wrapper.h \
             seccomp_cache.c seccomp_cache.h su_mount_ns.c dispatch.c ; do
@@ -597,7 +623,6 @@ for base in kernel_compat.h kernel_includes.h file_wrapper.c file_wrapper.h \
     fi
 done
 
-# Catch-all via grep -r (si find/grep fonctionnent, sinon ignoré)
 set +e
 INFRA_INCS=$(grep -rhoP '(?<=#include\s")infra/[^"]+(?=")' drivers/kernelsu 2>/dev/null | sort -u)
 set -e
@@ -613,7 +638,6 @@ if [ -n "${INFRA_INCS:-}" ]; then
     done
 fi
 
-# Vérification finale
 for f in drivers/kernelsu/kernel_compat.h drivers/kernelsu/infra/kernel_compat.h; do
     if [ -f "$f" ]; then
         echo "  ✔ $f présent ($(stat -c%s "$f") octets)"
@@ -689,7 +713,7 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f "out/arch/arm64/boot/Image" ]; then
     grep -iE "error:|undefined symbol|fatal error:" build.log | head -30 || true
     exit 1
 fi
-echo "✅✅✅ COMPILATION RÉUSSIE (V7.28.2) ✅✅✅"
+echo "✅✅✅ COMPILATION RÉUSSIE (V7.28.3) ✅✅✅"
 
 # ==================== 9. SAUVEGARDE DU NOYAU ====================
 mkdir -p "$GITHUB_WORKSPACE/output"
@@ -798,5 +822,5 @@ set -e
 
 # ==================== 12. SORTIE FINALE ====================
 echo ""
-echo "=== BUILD TERMINÉ v7.28.2 ==="
+echo "=== BUILD TERMINÉ v7.28.3 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
