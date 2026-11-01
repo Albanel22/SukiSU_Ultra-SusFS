@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.55 : SukiSU-Ultra (Base V7.40) + BakaSU ksud + Neutralisation sepolicy.c
-#         - Compilation garantie sans l'erreur 'susfs_add_sus_avd_allowed_by_type'
+# V7.56 : SukiSU-Ultra (Base V7.40) + BakaSU ksud + Stub de fonction propre
+#         - Ajoute la fonction manquante dans fs/susfs.c (pas de casse de syntaxe)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra — V7.55 ==="
+echo "=== Build SukiSU-Ultra — V7.56 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -129,44 +129,46 @@ if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
 fi
 
 # -----------------------------------------------------------------------------
-# 2c. 🚨 FIX CRUCIAL : Neutralisation de l'appel dans sepolicy.c
+# 2c. 🚨 FIX PROPRE : Ajout de la fonction manquante dans susfs.c
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== FIX : Neutralisation de susfs_add_sus_avd_allowed_by_type ==="
+echo "=== FIX PROPRE : Ajout de susfs_add_sus_avd_allowed_by_type ==="
 python3 - <<'PYEOF'
-import os, re, sys
+import os, sys
 
-target_file = None
-for root, dirs, files in os.walk('drivers/kernelsu'):
-    if 'sepolicy.c' in files:
-        target_file = os.path.join(root, 'sepolicy.c')
-        break
+# 1. Ajouter l'implémentation dans fs/susfs.c
+susfs_c = 'fs/susfs.c'
+if os.path.exists(susfs_c):
+    with open(susfs_c) as f: c = f.read()
+    if 'SUSFS_STUB_AVD_FIX' not in c:
+        stub = '''
+/* SUSFS_STUB_AVD_FIX : Fonction manquante pour SukiSU-Ultra */
+#ifdef CONFIG_KSU_SUSFS
+int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u16 type, u32 orig_avd_allowed) {
+    return 0;
+}
+#endif
+'''
+        with open(susfs_c, 'a') as f: f.write(stub)
+        print("  ✅ Fonction ajoutée dans fs/susfs.c")
 
-if not target_file:
-    print("  ⚠️ sepolicy.c introuvable, skip")
-    sys.exit(0)
-
-with open(target_file, 'r') as f:
-    c = f.read()
-
-if 'SUSFS_STUB_AVD_FIX' in c:
-    print(f"  ↻ {target_file} : déjà patché")
-    sys.exit(0)
-
-# Remplace l'appel par un bloc vide
-c2, n1 = re.subn(
-    r'susfs_add_sus_avd_allowed_by_type\s*\([^;]*\);',
-    'do { } while (0); /* SUSFS_STUB_AVD_FIX */',
-    c
-)
-
-if n1 == 0:
-    print(f"  ⚠️ Appel introuvable dans {target_file}")
-    sys.exit(0)
-
-with open(target_file, 'w') as f:
-    f.write(c2)
-print(f"  ✅ {target_file} : {n1} appel(s) neutralisé(s)")
+# 2. Ajouter la déclaration dans include/linux/susfs.h
+susfs_h = 'include/linux/susfs.h'
+if os.path.exists(susfs_h):
+    with open(susfs_h) as f: c = f.read()
+    if 'SUSFS_STUB_AVD_FIX' not in c:
+        decl = '''
+/* SUSFS_STUB_AVD_FIX */
+int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u16 type, u32 orig_avd_allowed);
+'''
+        # Insérer juste avant le dernier #endif
+        idx = c.rfind('#endif')
+        if idx != -1:
+            c = c[:idx] + decl + '\n' + c[idx:]
+        else:
+            c = c + decl
+        with open(susfs_h, 'w') as f: f.write(c)
+        print("  ✅ Déclaration ajoutée dans include/linux/susfs.h")
 PYEOF
 
 # -----------------------------------------------------------------------------
@@ -340,8 +342,8 @@ fi
 echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
 
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.55-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.55-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.56-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.56-susfs"
 
 # -----------------------------------------------------------------------------
 # 7. Compilation ksud (BakaSU)
@@ -422,12 +424,12 @@ if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.55-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.56-boot.img"
 cd "$GITHUB_WORKSPACE"
 
 # -----------------------------------------------------------------------------
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.55 ==="
+echo "=== BUILD TERMINÉ v7.56 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
