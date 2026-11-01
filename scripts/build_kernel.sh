@@ -53,20 +53,31 @@ echo "✅ SukiSU-Ultra intégré"
 echo ""
 echo "=== Correctif manager detection (ksu_install_fd O_CLOEXEC → 0) ==="
 python3 - <<'PYEOF'
-import re, sys
+import os, re, sys
 
-path = 'drivers/kernelsu/kernel/supercall/supercall.c'
-try:
-    with open(path) as f:
-        c = f.read()
-except FileNotFoundError:
-    print("  ⚠️ supercall.c introuvable, skip")
+# Recherche dynamique du fichier supercall.c ou supercalls.c
+target_file = None
+for root, dirs, files in os.walk('drivers/kernelsu'):
+    for file in files:
+        if file in ['supercall.c', 'supercalls.c']:
+            target_file = os.path.join(root, file)
+            break
+    if target_file:
+        break
+
+if not target_file:
+    print("  ⚠️ Fichier supercall.c introuvable, skip")
     sys.exit(0)
+
+with open(target_file) as f:
+    c = f.read()
 
 if 'MSG123' in c:
-    print("  ↻ supercall.c : déjà patché, skip")
+    print(f"  ↻ {target_file} : déjà patché, skip")
     sys.exit(0)
 
+# Cherche spécifiquement la fonction ksu_install_fd(void)
+# et remplace l'appel avec O_CLOEXEC par 0
 c2, n1 = re.subn(
     r'(int\s+ksu_install_fd\s*\(\s*void\s*\)\s*\{[^}]*?)return\s+ksu_install_fd_with_permissions\s*\(\s*O_CLOEXEC\s*,\s*0\s*\)',
     r'\1return ksu_install_fd_with_permissions(0, 0); /* MSG123: manager detection fix */',
@@ -75,12 +86,20 @@ c2, n1 = re.subn(
 )
 
 if n1 == 0:
-    print("  ⚠️ ksu_install_fd pattern introuvable dans supercall.c")
+    # Fallback : cherche juste la ligne avec O_CLOEXEC, 0
+    c2, n1 = re.subn(
+        r'return\s+ksu_install_fd_with_permissions\s*\(\s*O_CLOEXEC\s*,\s*0\s*\)',
+        'return ksu_install_fd_with_permissions(0, 0); /* MSG123 */',
+        c
+    )
+
+if n1 == 0:
+    print(f"  ⚠️ Pattern ksu_install_fd introuvable dans {target_file}")
     sys.exit(0)
 
-with open(path, 'w') as f:
+with open(target_file, 'w') as f:
     f.write(c2)
-print(f"  ✅ supercall.c : ksu_install_fd corrigé (O_CLOEXEC → 0)")
+print(f"  ✅ {target_file} : ksu_install_fd corrigé (O_CLOEXEC → 0)")
 PYEOF
 
 # -----------------------------------------------------------------------------
