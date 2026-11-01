@@ -51,7 +51,7 @@ echo "✅ SukiSU-Ultra intégré"
 # Le manager affiche Unsupported si le noyau builtin n’a pas ses points d’entrée.
 # Le script de hooks SUSFS doit donc avoir modifié les fichiers KSU attendus.
 [ -f drivers/kernelsu/Kconfig ] || { echo "❌ Kconfig SukiSU absent"; exit 1; }
-[ -f drivers/kernelsu/kernel/ksu.c ] || { echo "❌ sources SukiSU absentes"; exit 1; }
+[ -f drivers/kernelsu/ksu.c ] || { echo "❌ sources SukiSU absentes"; exit 1; }
 
 # -----------------------------------------------------------------------------
 # 2a. Correctif manager detection (O_CLOEXEC)
