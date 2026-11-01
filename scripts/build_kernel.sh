@@ -517,7 +517,7 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 cat >> out/.config <<'EOF'
 CONFIG_KSU=y
-CONFIG_KSU_MANUAL_HOOK=y
+# CONFIG_KSU_MANUAL_HOOK=y  <-- SUPPRIMÉ (option obsolète)
 CONFIG_KSU_LSM_SECURITY_HOOKS=y
 CONFIG_KSU_FEATURE_SULOG=y
 CONFIG_KSU_FEATURE_ADBROOT=y
@@ -542,9 +542,12 @@ CONFIG_THREAD_INFO_IN_TASK=y
 EOF
 
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
-grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU"; exit 1; }
-grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config || { echo "❌ MANUAL_HOOK droppé"; exit 1; }
-grep -q '^CONFIG_KSU_SUSFS=y' out/.config || { echo "❌ SUSFS droppé"; exit 1; }
+
+# Vérification stricte uniquement sur les options qui existent encore
+grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ CONFIG_KSU=y absent"; exit 1; }
+grep -q '^CONFIG_KSU_SUSFS=y' out/.config || { echo "❌ CONFIG_KSU_SUSFS=y absent"; exit 1; }
+
+echo "✅ Config validée (CONFIG_KSU et CONFIG_KSU_SUSFS sont bien présents)"
 
 # -----------------------------------------------------------------------------
 # 7. PATCHS MOTOROLA
