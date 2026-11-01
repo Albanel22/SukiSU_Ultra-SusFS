@@ -340,6 +340,72 @@ if match:
     print("  ✅ fdinfo.c corrigé")
 PYEOF
 
+# --- Correction fs/stat.c pour SUSFS ---
+echo "  → Correction fs/stat.c (déclarations SUSFS manquantes)…"
+python3 - <<'PYEOF'
+import re, sys
+
+path = 'fs/stat.c'
+with open(path) as f:
+    c = f.read()
+
+if 'SUSFS_STAT_DECLS' in c:
+    print("  ↻ fs/stat.c : déjà corrigé, skip")
+    sys.exit(0)
+
+# 1. Ajouter les includes SUSFS après les includes existants
+includes = '''
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#include <linux/susfs.h>
+#endif
+'''
+
+# Trouver la dernière ligne #include
+m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
+if m:
+    c = c[:m[-1].end()] + includes + c[m[-1].end():]
+else:
+    c = includes + c
+
+# 2. Ajouter les déclarations extern pour les fonctions SUSFS
+externs = '''
+/* SUSFS_STAT_DECLS : déclarations manuelles pour hooks manuels */
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+extern bool susfs_is_current_app_uid(void);
+extern bool susfs_is_inode_sus_kstat(struct inode *inode, bool *out_is_fuse);
+extern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat, u32 result_mask);
+#endif
+'''
+
+# Insérer après les includes
+m2 = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
+if m2:
+    c = c[:m2[-1].end()] + externs + c[m2[-1].end():]
+else:
+    c = externs + c
+
+# 3. Définir STATX_SUS_KSTAT si absent (valeurs utilisées par SUSFS)
+if '#define STATX_SUS_KSTAT' not in c:
+    defs = '''
+#ifndef STATX_SUS_KSTAT
+#define STATX_SUS_KSTAT 0x80000000U
+#endif
+#ifndef STATX_SUS_KSTAT_FUSE
+#define STATX_SUS_KSTAT_FUSE 0x40000000U
+#endif
+'''
+    m3 = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
+    if m3:
+        c = c[:m3[-1].end()] + defs + c[m3[-1].end():]
+    else:
+        c = defs + c
+
+with open(path, 'w') as f:
+    f.write(c)
+print("  ✅ fs/stat.c : déclarations SUSFS ajoutées")
+PYEOF
+
 # -----------------------------------------------------------------------------
 # 3c. PATH_UMOUNT & PATH_MOUNT (V7.24)
 # -----------------------------------------------------------------------------
