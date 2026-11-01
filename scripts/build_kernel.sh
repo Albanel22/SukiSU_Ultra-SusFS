@@ -2,13 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.46 : SukiSU-Ultra builtin (Base stable V7.40) + Astuce ksud BakaSU
-#         - PAS de hooks manuels (évite le Kernel Panic de la V7.41)
-#         - susfs_inline_hook_patches.sh (stable)
-#         - Compilation ksud depuis les sources + injection /system/bin/su
+# V7.47 : SukiSU-Ultra builtin (V7.40 stable) + ksud BakaSU + Stub static_call
+#         - Réintégration du stub static_call.h (erreur de la V7.46)
+#         - Pas de hooks manuels (évite le Kernel Panic)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra — V7.46 (Stable + BakaSU ksud) ==="
+echo "=== Build SukiSU-Ultra — V7.47 (Stable) ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -48,7 +47,28 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 echo "✅ SukiSU-Ultra intégré"
 
 # -----------------------------------------------------------------------------
-# 2a. Correctif manager detection (O_CLOEXEC)
+# 2a. Stub linux/static_call.h (OBLIGATOIRE POUR 4.19)
+# -----------------------------------------------------------------------------
+echo ""
+echo "=== Création du stub linux/static_call.h pour 4.19 ==="
+if [ ! -f include/linux/static_call.h ]; then
+    cat > include/linux/static_call.h <<'EOF'
+#ifndef _LINUX_STATIC_CALL_H
+#define _LINUX_STATIC_CALL_H
+/* Stub pour noyaux < 5.10 : les static calls ne sont pas supportées. */
+#define static_call(name) (name##_static_call)
+#define static_call_cond(name) (name##_static_call)
+#define static_call_update(name, func) do { } while (0)
+#define static_call_query(name) (name##_static_call)
+#endif
+EOF
+    echo "  ✅ stub créé"
+else
+    echo "  ↻ stub déjà présent"
+fi
+
+# -----------------------------------------------------------------------------
+# 2b. Correctif manager detection (O_CLOEXEC)
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Correctif manager detection (O_CLOEXEC) ==="
@@ -62,10 +82,14 @@ for root, dirs, files in os.walk('drivers/kernelsu'):
             break
     if target_file: break
 
-if not target_file: sys.exit(0)
+if not target_file:
+    print("  ⚠️ supercall.c introuvable")
+    sys.exit(0)
 
 with open(target_file) as f: c = f.read()
-if 'MSG123' in c: sys.exit(0)
+if 'MSG123' in c:
+    print(f"  ↻ {target_file} déjà patché")
+    sys.exit(0)
 
 c2, n1 = re.subn(
     r'(int\s+ksu_install_fd\s*\(\s*void\s*\)\s*\{[^}]*?)return\s+ksu_install_fd_with_permissions\s*\(\s*O_CLOEXEC\s*,\s*0\s*\)',
@@ -77,11 +101,11 @@ if n1 == 0:
 
 if n1 > 0:
     with open(target_file, 'w') as f: f.write(c2)
-    print(f"  ✅ {target_file} : corrigé")
+    print(f"  ✅ {target_file} corrigé")
 PYEOF
 
 # -----------------------------------------------------------------------------
-# 2b. Patch SUSFS 4.19 (Stable V7.40)
+# 2c. Patch SUSFS 4.19 (Stable V7.40)
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Patch SUSFS 4.19 ==="
@@ -271,7 +295,7 @@ if [ -f "$MSM_DRV" ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# 6. Compilation Kernel (V7.40 - Stable)
+# 6. Compilation Kernel
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Compilation Kernel ==="
@@ -290,14 +314,14 @@ fi
 echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
 
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.46"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.46"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.47"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.47"
 
 # -----------------------------------------------------------------------------
-# 7. Compilation ksud (L'ASTUCE DE BAKASU)
+# 7. Compilation ksud
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== Compilation ksud (depuis les sources) ==="
+echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -334,7 +358,7 @@ cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
 echo "✅ ksud compilé"
 
 # -----------------------------------------------------------------------------
-# 8. Repack (Injection BakaSU)
+# 8. Repack
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Repack ==="
@@ -371,12 +395,12 @@ chmod 755 ./local_su_binary
 rm -f ./local_su_binary
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-v7.46-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-v7.47-boot.img"
 cd "$GITHUB_WORKSPACE"
 
 # -----------------------------------------------------------------------------
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.46 ==="
+echo "=== BUILD TERMINÉ v7.47 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
