@@ -6,7 +6,7 @@ set -euo pipefail
 #         - Supprime la déclaration ET l'appel de la fonction manquante
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra — V7.59 non-GKI ==="
+echo "=== Build SukiSU-Ultra — V7.59.2 non-GKI ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -51,7 +51,7 @@ echo "✅ SukiSU-Ultra intégré"
 # Le manager affiche Unsupported si le noyau builtin n’a pas ses points d’entrée.
 # Le script de hooks SUSFS doit donc avoir modifié les fichiers KSU attendus.
 [ -f drivers/kernelsu/Kconfig ] || { echo "❌ Kconfig SukiSU absent"; exit 1; }
-[ -f drivers/kernelsu/ksu.c ] || { echo "❌ sources SukiSU absentes"; exit 1; }
+[ -f drivers/kernelsu/ksu_main.c ] || { echo "❌ sources SukiSU absentes"; exit 1; }
 
 # -----------------------------------------------------------------------------
 # 2a. Correctif manager detection (O_CLOEXEC)
@@ -364,7 +364,7 @@ fi
 echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
 
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.59-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.59.2-susfs"
 cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.58-susfs"
 
 # -----------------------------------------------------------------------------
@@ -441,12 +441,12 @@ if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.59-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.59.2-boot.img"
 cd "$GITHUB_WORKSPACE"
 
 # -----------------------------------------------------------------------------
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.59 ==="
+echo "=== BUILD TERMINÉ v7.59.2 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
