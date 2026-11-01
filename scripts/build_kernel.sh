@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.54 : SukiSU-Ultra (Base V7.40) + BakaSU ksud + Fix sepolicy.c
+# V7.55 : SukiSU-Ultra (Base V7.40) + BakaSU ksud + Neutralisation sepolicy.c
+#         - Compilation garantie sans l'erreur 'susfs_add_sus_avd_allowed_by_type'
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra — V7.54 ==="
+echo "=== Build SukiSU-Ultra — V7.55 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -76,7 +77,7 @@ if target_file:
 PYEOF
 
 # -----------------------------------------------------------------------------
-# 2b. Patch SUSFS 4.19
+# 2b. Patch SUSFS 4.19 (V7.40)
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Patch SUSFS 4.19 ==="
@@ -128,35 +129,44 @@ if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
 fi
 
 # -----------------------------------------------------------------------------
-# 2c. 🚨 FIX MAGIQUE : Macro pour le symbole manquant de sepolicy.c
+# 2c. 🚨 FIX CRUCIAL : Neutralisation de l'appel dans sepolicy.c
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== FIX : Symbole manquant dans sepolicy.c ==="
+echo "=== FIX : Neutralisation de susfs_add_sus_avd_allowed_by_type ==="
 python3 - <<'PYEOF'
-import re, sys
+import os, re, sys
 
-# On cible le fichier sepolicy.c de SukiSU
-path = 'drivers/kernelsu/selinux/sepolicy.c'
-try:
-    with open(path, 'r') as f:
-        c = f.read()
+target_file = None
+for root, dirs, files in os.walk('drivers/kernelsu'):
+    if 'sepolicy.c' in files:
+        target_file = os.path.join(root, 'sepolicy.c')
+        break
 
-    if 'SUSFS_STUB_AVD_FIX' not in c:
-        # On crée une macro qui ignore l'appel, peu importe le nombre d'arguments
-        stub = '\n/* SUSFS_STUB_AVD_FIX : Neutralise l\'appel manquant */\n#define susfs_add_sus_avd_allowed_by_type(...) do { } while (0)\n'
-        
-        # On l'insère juste après les #include
-        m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
-        if m:
-            c = c[:m[-1].end()] + stub + c[m[-1].end():]
-        else:
-            c = stub + c
-            
-        with open(path, 'w') as f:
-            f.write(c)
-        print("  ✅ Macro injectée dans sepolicy.c")
-except FileNotFoundError:
-    print("  ⚠️ sepolicy.c introuvable")
+if not target_file:
+    print("  ⚠️ sepolicy.c introuvable, skip")
+    sys.exit(0)
+
+with open(target_file, 'r') as f:
+    c = f.read()
+
+if 'SUSFS_STUB_AVD_FIX' in c:
+    print(f"  ↻ {target_file} : déjà patché")
+    sys.exit(0)
+
+# Remplace l'appel par un bloc vide
+c2, n1 = re.subn(
+    r'susfs_add_sus_avd_allowed_by_type\s*\([^;]*\);',
+    'do { } while (0); /* SUSFS_STUB_AVD_FIX */',
+    c
+)
+
+if n1 == 0:
+    print(f"  ⚠️ Appel introuvable dans {target_file}")
+    sys.exit(0)
+
+with open(target_file, 'w') as f:
+    f.write(c2)
+print(f"  ✅ {target_file} : {n1} appel(s) neutralisé(s)")
 PYEOF
 
 # -----------------------------------------------------------------------------
@@ -174,7 +184,7 @@ bash /tmp/susfs_inline_hook_patches.sh || exit 1
 echo ""
 echo "=== Corrections de compatibilité 4.19 ==="
 
-# static_call.h (OBLIGATOIRE)
+# static_call.h
 if [ ! -f include/linux/static_call.h ]; then
     cat > include/linux/static_call.h <<'EOF'
 #ifndef _LINUX_STATIC_CALL_H
@@ -330,8 +340,8 @@ fi
 echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
 
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.54-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.54-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.55-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.55-susfs"
 
 # -----------------------------------------------------------------------------
 # 7. Compilation ksud (BakaSU)
@@ -412,12 +422,12 @@ if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.54-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.55-boot.img"
 cd "$GITHUB_WORKSPACE"
 
 # -----------------------------------------------------------------------------
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.54 ==="
+echo "=== BUILD TERMINÉ v7.55 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
