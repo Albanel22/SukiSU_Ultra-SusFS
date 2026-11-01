@@ -10,8 +10,9 @@ echo "=== Build SukiSU-Ultra — V7.59.2 non-GKI ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
-# Le même ref doit être utilisé pour le noyau et ksud.
-SUKISU_REF="builtin"
+# La branche builtin contient le code noyau; userspace/ksud est dans main.
+SUKISU_KERNEL_REF="builtin"
+SUKISU_USERSPACE_REF="main"
 
 # -----------------------------------------------------------------------------
 # 0. Dépendances
@@ -42,7 +43,7 @@ echo ""
 echo "=== SukiSU-Ultra builtin ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$SUKISU_REF" \
+curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$SUKISU_KERNEL_REF" \
   || { echo "❌ setup.sh SukiSU échoué"; exit 1; }
 
 [ -d drivers/kernelsu ] || { echo "❌ drivers/kernelsu absent"; exit 1; }
@@ -364,7 +365,7 @@ fi
 echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
 
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.59.2-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.59.3-susfs"
 cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.58-susfs"
 
 # -----------------------------------------------------------------------------
@@ -386,7 +387,8 @@ export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src"
-git clone --depth=1 --branch "$SUKISU_REF" https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 --branch "$SUKISU_USERSPACE_REF" https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+[ -d "$GITHUB_WORKSPACE/ksud-src/userspace/ksud" ] || { echo "❌ userspace/ksud absent dans $SUKISU_USERSPACE_REF"; exit 1; }
 
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
@@ -441,12 +443,12 @@ if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.59.2-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.59.3-boot.img"
 cd "$GITHUB_WORKSPACE"
 
 # -----------------------------------------------------------------------------
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.59.2 ==="
+echo "=== BUILD TERMINÉ v7.59.3 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
