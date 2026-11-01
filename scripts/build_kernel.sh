@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.57 : SukiSU-Ultra (Base V7.40) + BakaSU ksud + Commentaire de l'appel
+# V7.58 : SukiSU-Ultra (Base V7.40) + BakaSU ksud + Suppression propre
+#         - Supprime la déclaration ET l'appel de la fonction manquante
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra — V7.57 ==="
+echo "=== Build SukiSU-Ultra — V7.58 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -128,10 +129,10 @@ if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
 fi
 
 # -----------------------------------------------------------------------------
-# 2c. 🚨 FIX PROPRE : Commenter l'appel à la fonction manquante
+# 2c. 🚨 FIX PROPRE : Suppression de la déclaration ET de l'appel
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== FIX PROPRE : Commenter susfs_add_sus_avd_allowed_by_type ==="
+echo "=== FIX PROPRE : Suppression déclaration + appel ==="
 python3 - <<'PYEOF'
 import os, re, sys
 
@@ -148,24 +149,31 @@ if not target_file:
 with open(target_file, 'r') as f:
     c = f.read()
 
-if 'SUSFS_AVD_REMOVED' in c:
+if 'SUSFS_AVD_DECL_REMOVED' in c:
     print(f"  ↻ {target_file} : déjà patché")
     sys.exit(0)
 
-# On commente l'appel à la fonction (sans toucher au reste)
-c2, n1 = re.subn(
-    r'(susfs_add_sus_avd_allowed_by_type\s*\([^;]*\);)',
-    r'/* \1 */ /* SUSFS_AVD_REMOVED */',
+# 1. Supprimer la déclaration
+c, n1 = re.subn(
+    r'extern\s+int\s+susfs_add_sus_avd_allowed_by_type\s*\([^;]*\);',
+    '/* SUSFS_AVD_DECL_REMOVED */',
     c
 )
 
-if n1 == 0:
-    print(f"  ⚠️ Appel introuvable dans {target_file}")
+# 2. Supprimer l'appel
+c, n2 = re.subn(
+    r'susfs_add_sus_avd_allowed_by_type\s*\([^;]*\);',
+    '/* SUSFS_AVD_CALL_REMOVED */',
+    c
+)
+
+if n1 == 0 and n2 == 0:
+    print(f"  ⚠️ Rien à remplacer dans {target_file}")
     sys.exit(0)
 
 with open(target_file, 'w') as f:
-    f.write(c2)
-print(f"  ✅ {target_file} : {n1} appel(s) commenté(s) (SUSFS_AVD_REMOVED)")
+    f.write(c)
+print(f"  ✅ {target_file} : déclaration supprimée ({n1}), appel supprimé ({n2})")
 PYEOF
 
 # -----------------------------------------------------------------------------
@@ -339,8 +347,8 @@ fi
 echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
 
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.57-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.57-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.58-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.58-susfs"
 
 # -----------------------------------------------------------------------------
 # 7. Compilation ksud (BakaSU)
@@ -421,12 +429,12 @@ if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.57-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.58-boot.img"
 cd "$GITHUB_WORKSPACE"
 
 # -----------------------------------------------------------------------------
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.57 ==="
+echo "=== BUILD TERMINÉ v7.58 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
