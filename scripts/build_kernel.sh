@@ -331,6 +331,14 @@ grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU droppé"; exit 1; }
 grep -q '^CONFIG_KSU_SUSFS=y' out/.config || { echo "❌ SUSFS droppé"; exit 1; }
 echo "✅ config validée"
 
+echo "=== DUMP REBOOT HOOK ==="
+grep -n "ksu_handle_sys_reboot" kernel/reboot.c
+sed -n '/SYSCALL_DEFINE4(reboot/,/^}/p' kernel/reboot.c | head -45
+echo "=== CONFIG KSU ==="
+grep -E "KSU|KPROBES|SECCOMP" out/.config
+echo "=== MAGIC ==="
+grep -rn "KSU_INSTALL_MAGIC1\|ksu_handle_sys_reboot" drivers/kernelsu | head -10
+
 # -----------------------------------------------------------------------------
 # 5. Patchs Motorola
 # -----------------------------------------------------------------------------
