@@ -475,7 +475,26 @@ if [ -n "$SUKI_REV" ]; then
 fi
 git -C "$GITHUB_WORKSPACE/ksud-src" log --oneline -1 | tee -a "$AUDIT"
 
-cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
+# Le dossier du crate ksud peut changer d'un commit à l'autre : on le cherche
+find_ksud_dir() {
+    grep -rl --include=Cargo.toml '^name *= *"ksud"' "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null \
+        | grep -v '/target/' | head -1 | xargs -r dirname
+}
+KSUD_DIR=$(find_ksud_dir || true)
+if [ -z "$KSUD_DIR" ]; then
+    echo "⚠️ crate ksud absent à la révision épinglée, bascule sur main"
+    git -C "$GITHUB_WORKSPACE/ksud-src" checkout main
+    git -C "$GITHUB_WORKSPACE/ksud-src" log --oneline -1 | tee -a "$AUDIT"
+    KSUD_DIR=$(find_ksud_dir || true)
+fi
+if [ -z "$KSUD_DIR" ]; then
+    echo "❌ crate ksud introuvable"
+    ls -la "$GITHUB_WORKSPACE/ksud-src" "$GITHUB_WORKSPACE/ksud-src/userspace" 2>&1 || true
+    exit 1
+fi
+echo "ksud dir: $KSUD_DIR" | tee -a "$AUDIT"
+
+cd "$KSUD_DIR"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
 [target.aarch64-linux-android]
