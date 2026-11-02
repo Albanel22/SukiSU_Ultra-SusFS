@@ -458,4 +458,4 @@ cd "$GITHUB_WORKSPACE"
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== BUILD TERMINÉ v7.58 ==="
-ls -lh "$GITHUB_WORKSPACE/outPYPYEOF
+ls -lh "$GITHUB_WORKSPACE/output/"
