@@ -2,14 +2,19 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.58 : SukiSU-Ultra (Base V7.40) + BakaSU ksud + Suppression propre
+# V7.60 : SukiSU-Ultra builtin + SUSFS/KPM, versions figées v4.3.0
 #         - Supprime la déclaration ET l'appel de la fonction manquante
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra — V7.58 ==="
+echo "=== Build SukiSU-Ultra — V7.60 non-GKI / SukiSU v4.3.0 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
+# Versions figées pour éviter de mélanger le noyau builtin courant
+# avec un ksud/Manager provenant d’une autre révision.
+SUKISU_KERNEL_REF="0289fe99ab593c92f349360176ab5301d2986542"
+MANAGER_VERSION="v4.3.0"
+KSUD_VERSION="v4.3.0"
 
 # -----------------------------------------------------------------------------
 # 0. Dépendances
@@ -40,11 +45,16 @@ echo ""
 echo "=== SukiSU-Ultra builtin ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin \
+curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$SUKISU_KERNEL_REF" \
   || { echo "❌ setup.sh SukiSU échoué"; exit 1; }
 
 [ -d drivers/kernelsu ] || { echo "❌ drivers/kernelsu absent"; exit 1; }
 echo "✅ SukiSU-Ultra intégré"
+
+# Le manager affiche Unsupported si le noyau builtin n’a pas ses points d’entrée.
+# Le script de hooks SUSFS doit donc avoir modifié les fichiers KSU attendus.
+[ -f drivers/kernelsu/Kconfig ] || { echo "❌ Kconfig SukiSU absent"; exit 1; }
+[ -f drivers/kernelsu/ksu_main.c ] || { echo "❌ sources SukiSU absentes"; exit 1; }
 
 # -----------------------------------------------------------------------------
 # 2a. Correctif manager detection (O_CLOEXEC)
@@ -185,6 +195,16 @@ curl -LSsf "$BASE_JACK/susfs_inline_hook_patches.sh" -o /tmp/susfs_inline_hook_p
 chmod +x /tmp/susfs_inline_hook_patches.sh
 bash /tmp/susfs_inline_hook_patches.sh || exit 1
 
+# Ne pas produire une image qui démarrera mais sera vue comme Unsupported.
+for f in fs/exec.c fs/open.c fs/stat.c security/selinux/hooks.c; do
+    [ -f "$f" ] || { echo "❌ fichier hook absent: $f"; exit 1; }
+done
+if ! grep -RqsE 'ksu_handle_execveat|ksu_handle_faccessat|ksu_handle_stat' fs/exec.c fs/open.c fs/stat.c; then
+    echo "❌ Hooks KSU non injectés : image incompatible avec le manager"
+    exit 1
+fi
+echo "✅ hooks KSU/SUSFS détectés"
+
 # -----------------------------------------------------------------------------
 # 3b. Corrections de compatibilité 4.19
 # -----------------------------------------------------------------------------
@@ -290,8 +310,8 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 cat >> out/.config <<'EOF'
 CONFIG_KSU=y
 CONFIG_KSU_LSM_SECURITY_HOOKS=y
-CONFIG_KSU_FEATURE_SULOG=y
 CONFIG_KSU_FEATURE_ADBROOT=y
+CONFIG_KPM=y
 
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -347,48 +367,27 @@ fi
 echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
 
 mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.58-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.58-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.60-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.60-susfs"
 
 # -----------------------------------------------------------------------------
-# 7. Compilation ksud (BakaSU)
+# 7. ksud officiel aligné sur le Manager v4.3.0
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== Compilation ksud ==="
+echo "=== Installation ksud ${KSUD_VERSION} ==="
 cd "$GITHUB_WORKSPACE"
 
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-rustup toolchain install nightly; rustup default nightly; rustup target add aarch64-linux-android
+KSUD_URL="https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/download/${KSUD_VERSION}/ksud-aarch64-linux-android"
+KSUD_SHA256="e9fcad8189397d5c96965819ae1f184557c7a51701fed183a1e0190242a89501"
 
-wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip; unzip -q android-ndk-r26d-linux.zip
-export ANDROID_NDK_ROOT="$GITHUB_WORKSPACE/android-ndk-r26d"
-export AARCH64_CLANG_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
-export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
-export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
+rm -f ksud
+curl --fail --location --retry 3 "$KSUD_URL" -o ksud
+chmod 755 ksud
 
-rm -rf "$GITHUB_WORKSPACE/ksud-src"
-git clone --depth=1 --branch main https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+echo "$KSUD_SHA256  ksud" | sha256sum -c -
+file ksud
 
-cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
-mkdir -p .cargo
-cat > .cargo/config.toml <<EOF
-[target.aarch64-linux-android]
-linker = "$AARCH64_CLANG_PATH"
-[env]
-CC_aarch64_linux_android = "$AARCH64_CLANG_PATH"
-CXX_aarch64_linux_android = "$AARCH64_CLANGXX_PATH"
-AR_aarch64_linux_android = "$AR_PATH"
-BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android = "$BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android"
-EOF
-export CARGO_NET_GIT_FETCH_WITH_CLI=true
-cargo +nightly build --release --target aarch64-linux-android
-
-KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1 || true)
-if [ -z "$KSUD_BINARY" ]; then echo "❌ ksud introuvable"; exit 1; fi
-cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
-echo "✅ ksud compilé"
+echo "✅ ksud ${KSUD_VERSION} ARM64 vérifié"
 
 # -----------------------------------------------------------------------------
 # 8. Repack
@@ -397,7 +396,7 @@ echo ""
 echo "=== Repack ==="
 cd "$GITHUB_WORKSPACE"
 rm -f boot-stock.img 2>/dev/null || true
-gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img || true
+gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O boot-stock.img
 
 if [ ! -f boot-stock.img ] || [ "$(stat -c%s boot-stock.img 2>/dev/null || echo 0)" -lt 50000000 ]; then
     echo "❌ boot-stock.img introuvable — Image sauvée dans output/"
@@ -418,23 +417,18 @@ cp "$GITHUB_WORKSPACE/kernel_sources/out/arch/arm64/boot/Image" kernel
 
 if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
     ./magiskboot cpio ramdisk.cpio \
-        "mkdir 0755 data" "mkdir 0755 data/adb" "mkdir 0755 data/adb/ksud" \
-        "add 0755 data/adb/ksud/ksud $GITHUB_WORKSPACE/ksud"
-    cp "$GITHUB_WORKSPACE/ksud" ./local_su_binary; chmod 755 ./local_su_binary
-    ./magiskboot cpio ramdisk.cpio \
-        "mkdir 0755 system" "mkdir 0755 system/bin" \
-        "add 06755 system/bin/su ./local_su_binary"
-    rm -f ./local_su_binary
-    echo "✅ ksud + su injectés dans le ramdisk"
+        "mkdir 0755 data" "mkdir 0755 data/adb" \
+        "add 0755 data/adb/ksud $GITHUB_WORKSPACE/ksud"
+    echo "✅ ksud injecté comme exécutable /data/adb/ksud"
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.58-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.60-boot.img"
 cd "$GITHUB_WORKSPACE"
 
 # -----------------------------------------------------------------------------
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.58 ==="
+echo "=== BUILD TERMINÉ v7.60 ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
