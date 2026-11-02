@@ -58,7 +58,7 @@ echo "✅ SukiSU-Ultra intégré"
 
 # Option : figer le driver sur un commit précis (test A/B). Vide = dernier commit.
 # Exemple : SUKI_PIN="${SUKI_PIN:-b5917072}"
-SUKI_PIN="${SUKI_PIN:-}"
+SUKI_PIN="${SUKI_PIN:-b5917072}"
 if [ -n "$SUKI_PIN" ] && [ -e KernelSU/.git ]; then
     git -C KernelSU fetch --unshallow 2>/dev/null || git -C KernelSU fetch --all --tags 2>/dev/null || true
     if git -C KernelSU checkout "$SUKI_PIN" 2>/dev/null; then
