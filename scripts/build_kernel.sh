@@ -274,6 +274,19 @@ try:
 except FileNotFoundError: pass
 PYEOF
 
+echo "=== AUDIT HOOKS ==="
+for h in "ksu_handle_sys_reboot kernel/reboot.c" \
+         "ksu_handle_execveat fs/exec.c" \
+         "ksu_handle_faccessat fs/open.c" \
+         "ksu_handle_stat fs/stat.c" \
+         "ksu_handle_setresuid kernel/sys.c" \
+         "ksu_handle_sys_read fs/read_write.c" \
+         "ksu_handle_input_handle_event drivers/input/input.c"; do
+  set -- $h
+  grep -q "$1" "$2" && echo "✅ $1" || echo "❌ $1 ABSENT dans $2"
+done
+grep -E "KSU_MANUAL_HOOK|KSU_SUSFS_INLINE|KPROBES" out/.config 2>/dev/null || true
+
 # -----------------------------------------------------------------------------
 # 4. Config
 # -----------------------------------------------------------------------------
