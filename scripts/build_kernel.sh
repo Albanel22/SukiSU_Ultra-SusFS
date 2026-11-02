@@ -56,6 +56,18 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 [ -d drivers/kernelsu ] || { echo "❌ drivers/kernelsu absent"; exit 1; }
 echo "✅ SukiSU-Ultra intégré"
 
+# Option : figer le driver sur un commit précis (test A/B). Vide = dernier commit.
+# Exemple : SUKI_PIN="${SUKI_PIN:-b5917072}"
+SUKI_PIN="${SUKI_PIN:-}"
+if [ -n "$SUKI_PIN" ] && [ -e KernelSU/.git ]; then
+    git -C KernelSU fetch --unshallow 2>/dev/null || git -C KernelSU fetch --all --tags 2>/dev/null || true
+    if git -C KernelSU checkout "$SUKI_PIN" 2>/dev/null; then
+        echo "✅ driver figé sur $SUKI_PIN"
+    else
+        echo "⚠️ checkout $SUKI_PIN impossible, driver laissé au dernier commit"
+    fi
+fi
+
 # Commit exact du driver (pour compiler ksud à la même révision)
 SUKI_REV=""
 if [ -d KernelSU/.git ] || [ -f KernelSU/.git ]; then
@@ -391,6 +403,22 @@ echo "✅ config validée"
     grep -E "KSU|KPROBES|SECCOMP" out/.config || true
 
     echo ""
+    echo "=== LSM_HOOK : détection manager / setresuid / seccomp ==="
+    sed -n '15,185p' drivers/kernelsu/hook/lsm_hook.c || true
+
+    echo ""
+    echo "=== DISPATCH : suite de ksu_handle_sys_reboot (variante SuSFS) ==="
+    sed -n '450,560p' drivers/kernelsu/supercall/dispatch.c || true
+
+    echo ""
+    echo "=== disable_seccomp (app_profile.c) ==="
+    sed -n '50,80p' drivers/kernelsu/policy/app_profile.c || true
+
+    echo ""
+    echo "=== Makefile du driver ==="
+    grep -n "lsm_hook\|hook/\|supercall\|dispatch\|app_profile" drivers/kernelsu/Makefile || true
+
+    echo ""
     echo "=== Kconfig du driver (symboles SuSFS / hook) ==="
     grep -rn "config KSU" drivers/kernelsu/Kconfig | head -40 || true
 
@@ -443,6 +471,7 @@ cp out/System.map "$GITHUB_WORKSPACE/output/System.map-${VER}-susfs"
     echo "nombre de symboles susfs_ : $(grep -ci ' susfs_' out/System.map || true)"
     grep -i ' susfs_' out/System.map | head -25 || true
     echo "ksu_handle_sys_reboot : $(grep -c ' ksu_handle_sys_reboot' out/System.map || true)"
+    grep -E " (ksu_handle_setresuid|disable_seccomp|ksu_install_fd|ksu_handle_execveat)$" out/System.map || echo "⚠️ symboles hook absents du System.map"
     true
 } 2>&1 | tee -a "$AUDIT"
 
