@@ -2,14 +2,24 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.58 : SukiSU-Ultra (Base V7.40) + BakaSU ksud + Suppression propre
-#         - Supprime la déclaration ET l'appel de la fonction manquante
+# V7.59 : SukiSU-Ultra + SuSFS (patch Jack) + ksud épinglé sur le commit du driver
+#   Changements vs V7.58 :
+#   - dernière ligne corrigée (guillemet non fermé -> exit 2)
+#   - ksud compilé au MÊME commit que le driver du noyau
+#   - validation stricte des options SuSFS après olddefconfig
+#   - audits (hooks, setuid/seccomp, reboot, symboles SuSFS) écrits dans
+#     output/audit-v7.59.txt  (aucun effet sur le build)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra — V7.58 ==="
+echo "=== Build SukiSU-Ultra — V7.59 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
+VER="v7.59"
+
+mkdir -p "$GITHUB_WORKSPACE/output"
+AUDIT="$GITHUB_WORKSPACE/output/audit-${VER}.txt"
+: > "$AUDIT"
 
 # -----------------------------------------------------------------------------
 # 0. Dépendances
@@ -45,6 +55,14 @@ curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/
 
 [ -d drivers/kernelsu ] || { echo "❌ drivers/kernelsu absent"; exit 1; }
 echo "✅ SukiSU-Ultra intégré"
+
+# Commit exact du driver (pour compiler ksud à la même révision)
+SUKI_REV=""
+if [ -d KernelSU/.git ] || [ -f KernelSU/.git ]; then
+    SUKI_REV=$(git -C KernelSU rev-parse HEAD 2>/dev/null || true)
+fi
+echo "SukiSU driver rev: ${SUKI_REV:-inconnu}"
+echo "SukiSU driver rev: ${SUKI_REV:-inconnu}" >> "$AUDIT"
 
 # -----------------------------------------------------------------------------
 # 2a. Correctif manager detection (O_CLOEXEC)
@@ -129,7 +147,7 @@ if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
 fi
 
 # -----------------------------------------------------------------------------
-# 2c. 🚨 FIX PROPRE : Suppression de la déclaration ET de l'appel
+# 2c. FIX PROPRE : Suppression de la déclaration ET de l'appel
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== FIX PROPRE : Suppression déclaration + appel ==="
@@ -274,19 +292,6 @@ try:
 except FileNotFoundError: pass
 PYEOF
 
-echo "=== AUDIT HOOKS ==="
-for h in "ksu_handle_sys_reboot kernel/reboot.c" \
-         "ksu_handle_execveat fs/exec.c" \
-         "ksu_handle_faccessat fs/open.c" \
-         "ksu_handle_stat fs/stat.c" \
-         "ksu_handle_setresuid kernel/sys.c" \
-         "ksu_handle_sys_read fs/read_write.c" \
-         "ksu_handle_input_handle_event drivers/input/input.c"; do
-  set -- $h
-  grep -q "$1" "$2" && echo "✅ $1" || echo "❌ $1 ABSENT dans $2"
-done
-grep -E "KSU_MANUAL_HOOK|KSU_SUSFS_INLINE|KPROBES" out/.config 2>/dev/null || true
-
 # -----------------------------------------------------------------------------
 # 4. Config
 # -----------------------------------------------------------------------------
@@ -329,15 +334,77 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU droppé"; exit 1; }
 grep -q '^CONFIG_KSU_SUSFS=y' out/.config || { echo "❌ SUSFS droppé"; exit 1; }
+
+# Validation stricte des sous-options SuSFS (échec si olddefconfig les a supprimées)
+SUSFS_MISSING=0
+for o in KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SUS_MAP; do
+    if grep -q "^CONFIG_${o}=y" out/.config; then
+        echo "  ✅ CONFIG_${o}"
+    else
+        echo "  ❌ CONFIG_${o} absent après olddefconfig"
+        SUSFS_MISSING=1
+    fi
+done
+[ "$SUSFS_MISSING" -eq 0 ] || { echo "❌ Options SuSFS perdues (voir Kconfig du driver)"; exit 1; }
 echo "✅ config validée"
 
-echo "=== DUMP REBOOT HOOK ==="
-grep -n "ksu_handle_sys_reboot" kernel/reboot.c
-sed -n '/SYSCALL_DEFINE4(reboot/,/^}/p' kernel/reboot.c | head -45
-echo "=== CONFIG KSU ==="
-grep -E "KSU|KPROBES|SECCOMP" out/.config
-echo "=== MAGIC ==="
-grep -rn "KSU_INSTALL_MAGIC1\|ksu_handle_sys_reboot" drivers/kernelsu | head -10
+# -----------------------------------------------------------------------------
+# 4b. AUDITS (diagnostic uniquement, écrits dans output/audit-v7.59.txt)
+# -----------------------------------------------------------------------------
+{
+    echo ""
+    echo "=== AUDIT HOOKS (lignes réelles, pas seulement la présence du nom) ==="
+    for h in "ksu_handle_sys_reboot kernel/reboot.c" \
+             "ksu_handle_execveat fs/exec.c" \
+             "ksu_handle_faccessat fs/open.c" \
+             "ksu_handle_stat fs/stat.c" \
+             "ksu_handle_setresuid kernel/sys.c" \
+             "ksu_handle_sys_read fs/read_write.c" \
+             "ksu_handle_input_handle_event drivers/input/input.c"; do
+        set -- $h
+        echo "--- $1 dans $2"
+        grep -n "$1" "$2" || echo "❌ ABSENT"
+    done
+
+    echo ""
+    echo "=== DUMP REBOOT HOOK ==="
+    grep -n "ksu_handle_sys_reboot" kernel/reboot.c || true
+    sed -n '/SYSCALL_DEFINE4(reboot/,/^}/p' kernel/reboot.c | head -20 || true
+
+    echo ""
+    echo "=== SETUID HOOK (kernel/sys.c) ==="
+    grep -n -B2 -A10 "ksu_handle_setresuid\|ksu_handle_setuid" kernel/sys.c | head -80 || true
+
+    echo ""
+    echo "=== DRIVER : seccomp / install fd / setuid ==="
+    grep -rn "disable_seccomp\|ksu_install_fd\|ksu_handle_setuid\|ksu_handle_setresuid" drivers/kernelsu | head -40 || true
+
+    echo ""
+    echo "=== SUPERCALL : #if / #else / #endif ==="
+    grep -n "^#if\|^#else\|^#endif" drivers/kernelsu/supercall/supercall.c | head -40 || true
+    sed -n '125,160p' drivers/kernelsu/supercall/supercall.c || true
+    echo "--- dispatch.c autour de ksu_handle_sys_reboot"
+    sed -n '405,450p' drivers/kernelsu/supercall/dispatch.c || true
+
+    echo ""
+    echo "=== CONFIG KSU / SECCOMP / KPROBES ==="
+    grep -E "KSU|KPROBES|SECCOMP" out/.config || true
+
+    echo ""
+    echo "=== Kconfig du driver (symboles SuSFS / hook) ==="
+    grep -rn "config KSU" drivers/kernelsu/Kconfig | head -40 || true
+
+    echo ""
+    echo "=== MAGIC ==="
+    grep -rn "KSU_INSTALL_MAGIC1\|ksu_handle_sys_reboot" drivers/kernelsu | head -10 || true
+
+    echo ""
+    echo "=== SuSFS : fichiers et patch ==="
+    ls -l fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h 2>&1 || true
+    grep -n susfs fs/Makefile || echo "⚠️ susfs.o absent de fs/Makefile"
+    grep -E "FAILED|rejected|Hunk" /tmp/susfs_patch.log | head -30 || true
+    true
+} 2>&1 | tee -a "$AUDIT"
 
 # -----------------------------------------------------------------------------
 # 5. Patchs Motorola
@@ -367,12 +434,20 @@ if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
 fi
 echo "✅✅✅ COMPILATION RÉUSSIE ✅✅✅"
 
-mkdir -p "$GITHUB_WORKSPACE/output"
-cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-v7.58-susfs"
-cp out/System.map "$GITHUB_WORKSPACE/output/System.map-v7.58-susfs"
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-${VER}-susfs"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-${VER}-susfs"
+
+{
+    echo ""
+    echo "=== AUDIT SYMBOLES SuSFS dans System.map ==="
+    echo "nombre de symboles susfs_ : $(grep -ci ' susfs_' out/System.map || true)"
+    grep -i ' susfs_' out/System.map | head -25 || true
+    echo "ksu_handle_sys_reboot : $(grep -c ' ksu_handle_sys_reboot' out/System.map || true)"
+    true
+} 2>&1 | tee -a "$AUDIT"
 
 # -----------------------------------------------------------------------------
-# 7. Compilation ksud (BakaSU)
+# 7. Compilation ksud (même révision que le driver)
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Compilation ksud ==="
@@ -390,7 +465,15 @@ export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src"
-git clone --depth=1 --branch main https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --branch main https://github.com/SukiSU-Ultra/SukiSU-Ultra.git "$GITHUB_WORKSPACE/ksud-src"
+if [ -n "$SUKI_REV" ]; then
+    if git -C "$GITHUB_WORKSPACE/ksud-src" checkout "$SUKI_REV" 2>/dev/null; then
+        echo "✅ ksud épinglé sur $SUKI_REV"
+    else
+        echo "⚠️ checkout $SUKI_REV impossible, ksud construit depuis main"
+    fi
+fi
+git -C "$GITHUB_WORKSPACE/ksud-src" log --oneline -1 | tee -a "$AUDIT"
 
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
@@ -450,12 +533,12 @@ if [ -f "$GITHUB_WORKSPACE/ksud" ]; then
 fi
 
 ./magiskboot repack boot.img new-boot.img
-mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-v7.58-boot.img"
+mv new-boot.img "$GITHUB_WORKSPACE/output/SukiSU-Ultra-SUSFS-${VER}-boot.img"
 cd "$GITHUB_WORKSPACE"
 
 # -----------------------------------------------------------------------------
 # 9. Sortie
 # -----------------------------------------------------------------------------
 echo ""
-echo "=== BUILD TERMINÉ v7.58 ==="
+echo "=== BUILD TERMINÉ ${VER} ==="
 ls -lh "$GITHUB_WORKSPACE/output/"
