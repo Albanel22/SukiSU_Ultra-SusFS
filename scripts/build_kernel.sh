@@ -47,7 +47,7 @@ cd "$GITHUB_WORKSPACE"
 # -----------------------------------------------------------------------------
 # La branche lineage-23.2 évolue : on fige la source sur le commit qui a donné un build valide.
 # Vide = dernière version de la branche (peut casser, voir README).
-KERNEL_PIN="${KERNEL_PIN:-9426323c2ac}"
+KERNEL_PIN="${KERNEL_PIN:-9426323c2acd0865fd565a6dd8a9f39f831cbec3}"
 KERNEL_URL="https://github.com/LineageOS/android_kernel_motorola_sm8250.git"
 if [ -n "$KERNEL_PIN" ]; then
     git clone --filter=blob:none --no-checkout -b lineage-23.2 "$KERNEL_URL" kernel_sources
@@ -188,10 +188,30 @@ with open(path, 'w') as f: f.write(c)
 PYEOF
 
 python3 - <<'PYEOF'
-import sys
+import sys, os
 path = 'fs/namespace.c'
 with open(path) as f: c = f.read()
-if '#define DEFAULT_KSU_MNT_ID' not in c and 'DEFAULT_KSU_MNT_ID' in c:
+hdr = ''
+if os.path.exists('include/linux/susfs_def.h'):
+    with open('include/linux/susfs_def.h') as hf: hdr = hf.read()
+if '#define DEFAULT_KSU_MNT_ID' in hdr:
+    # susfs_def.h définit déjà ces macros : on retire les doublons éventuels de namespace.c
+    # (un bloc du patch, appliqué avec fuzz, les redéfinit avec d'autres valeurs)
+    import re
+    n_total = 0
+    for name in ('DEFAULT_KSU_MNT_ID', 'DEFAULT_KSU_MNT_GROUP_ID'):
+        if re.search(r'#define\s+' + name + r'\b', hdr):
+            c, n = re.subn(r'^[ \t]*#define[ \t]+' + name + r'\b[^\n]*\n', '', c, flags=re.M)
+            n_total += n
+    if n_total:
+        with open(path, 'w') as f: f.write(c)
+    print(f"  ↻ macros KSU_MNT déjà définies par susfs_def.h : {n_total} doublon(s) retiré(s) de namespace.c")
+    sys.exit(0)
+try:
+    hdr = open('include/linux/susfs_def.h').read()
+except FileNotFoundError:
+    hdr = ''
+if '#define DEFAULT_KSU_MNT_ID' not in c and '#define DEFAULT_KSU_MNT_ID' not in hdr and 'DEFAULT_KSU_MNT_ID' in c:
     anchor = '#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */'
     c = c.replace(anchor, anchor + '\n#define DEFAULT_KSU_MNT_ID 500000\n#define DEFAULT_KSU_MNT_GROUP_ID 5000\n', 1) if anchor in c else '#define DEFAULT_KSU_MNT_ID 500000\n' + c
     with open(path, 'w') as f: f.write(c)
@@ -601,7 +621,7 @@ echo "=== Compilation ==="
 set +eo pipefail
 make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   KCFLAGS="-Wno-unused-variable -Wno-declaration-after-statement" \
-  -j$(nproc) Image 2>&1 | tee build.log
+  -k -j$(nproc) Image 2>&1 | tee build.log
 MAKE_RC=${PIPESTATUS[0]}
 set -eo pipefail
 
