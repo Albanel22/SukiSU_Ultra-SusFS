@@ -144,18 +144,60 @@ if [ -f "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" ]; then
     cp "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" "$SUSFS_PATCH"
     echo "Patch SuSFS : copie locale du dépôt (patches/)" | tee -a "$AUDIT"
 else
-    if [ -f "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" ]; then
-    cp "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" "$SUSFS_PATCH"
-    echo "Patch SuSFS : copie locale épinglée (patches/susfs_patch_to_4.19.patch)" | tee -a "$AUDIT"
-else
     curl -LSsf "$BASE_JACK/Patch/susfs_patch_to_4.19.patch" -o "$SUSFS_PATCH" || { echo "❌ download échoué"; exit 1; }
-    echo "Patch SuSFS : téléchargé depuis la branche mainline (non épinglé)" | tee -a "$AUDIT"
-fi
     echo "Patch SuSFS : téléchargé depuis la branche mainline (non figé)" | tee -a "$AUDIT"
 fi
 cp "$SUSFS_PATCH" "$GITHUB_WORKSPACE/output/" 2>/dev/null || true
 echo "sha256 patch SuSFS : $(sha256sum "$SUSFS_PATCH" | cut -d' ' -f1)" | tee -a "$AUDIT"
-echo "fs/susfs.c AVANT patch : $(wc -l < fs/susfs.c 2>/dev/null || echo absent) lignes, sha256 $(sha256sum fs/susfs.c 2>/dev/null | cut -c1-16)" | tee -a "$AUDIT"
+if [ -f fs/susfs.c ]; then
+    echo "fs/susfs.c AVANT patch : $(wc -l < fs/susfs.c) lignes" | tee -a "$AUDIT"
+else
+    echo "fs/susfs.c AVANT patch : absent (fourni par le patch)" | tee -a "$AUDIT"
+fi
+
+# Contrôle d'intégrité du patch : chaque bloc (@@) doit contenir autant de lignes que son en-tête l'annonce
+python3 - "$SUSFS_PATCH" <<'PYEOF' 2>&1 | tee -a "$AUDIT"
+import re, sys
+t = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+lines = t.split('\n')
+print(f"  patch : {len(lines)} lignes, {t.count(chr(9))} tabulations, CRLF={'oui' if chr(13) in t else 'non'}")
+files = re.findall(r'^diff --git a/(\S+)', t, re.M)
+print(f"  patch : {len(files)} fichiers, fs/susfs.c {'présent' if 'fs/susfs.c' in files else 'ABSENT'}")
+bad = []
+cur = None
+i = 0
+n = len(lines)
+while i < n:
+    line = lines[i]
+    m = re.match(r'diff --git a/(\S+)', line)
+    if m:
+        cur = m.group(1)
+    h = re.match(r'@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', line)
+    if h:
+        want_old = int(h.group(2) if h.group(2) is not None else 1)
+        want_new = int(h.group(4) if h.group(4) is not None else 1)
+        old = new = 0
+        i += 1
+        while i < n and (old < want_old or new < want_new):
+            l = lines[i]
+            if l.startswith('+'): new += 1
+            elif l.startswith('-'): old += 1
+            elif l.startswith('\\'): pass
+            elif l == '' and i == n - 1: break
+            elif l.startswith(' ') or l == '': old += 1; new += 1
+            else: break
+            i += 1
+        if old != want_old or new != want_new:
+            bad.append((cur, line.strip(), old, want_old, new, want_new))
+        continue
+    i += 1
+if bad:
+    print(f"  ❌ {len(bad)} bloc(s) incohérent(s) : patch tronqué ou modifié")
+    for b in bad[:8]:
+        print(f"     {b[0]} {b[1]} : lignes lues -{b[2]}/+{b[4]}, annoncées -{b[3]}/+{b[5]}")
+else:
+    print("  ✅ patch cohérent (tous les blocs ont la taille annoncée)")
+PYEOF
 
 if patch -p1 --forward --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; then
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1
@@ -163,6 +205,23 @@ if patch -p1 --forward --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; the
 else
     echo "  ⚠️ Patch partiellement rejeté"
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 || true
+fi
+
+if [ ! -f fs/susfs.c ]; then
+    echo "❌ fs/susfs.c absent après le patch : la copie utilisée est incomplète ou abîmée" | tee -a "$AUDIT"
+    tail -n 25 /tmp/susfs_patch.log | tee -a "$AUDIT" || true
+    if [ "${SUSFS_PATCH_FALLBACK:-1}" = "1" ]; then
+        echo "→ nouvelle tentative avec le patch de la branche mainline (SUSFS_PATCH_FALLBACK=0 pour l'interdire)" | tee -a "$AUDIT"
+        if curl -LSsf "$BASE_JACK/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_mainline.patch; then
+            echo "sha256 patch mainline : $(sha256sum /tmp/susfs_patch_mainline.patch | cut -d' ' -f1)" | tee -a "$AUDIT"
+            cp /tmp/susfs_patch_mainline.patch "$GITHUB_WORKSPACE/output/susfs_patch_mainline.patch" 2>/dev/null || true
+            patch -p1 --forward < /tmp/susfs_patch_mainline.patch > /tmp/susfs_patch2.log 2>&1 || true
+        fi
+    fi
+    if [ ! -f fs/susfs.c ]; then
+        echo "❌ fs/susfs.c toujours absent : arrêt du build" | tee -a "$AUDIT"
+        exit 1
+    fi
 fi
 
 echo ""
@@ -190,24 +249,49 @@ echo "reste après retry : $(find . -name '*.rej' | wc -l) fichier(s) .rej"
 find . -name "*.rej" -delete 2>/dev/null || true
 find . -name "*.orig" -delete 2>/dev/null || true
 
-# Injection manuelle namespace.c
+# Injection manuelle namespace.c (chaque morceau n'est ajouté que s'il manque)
 python3 - <<'PYEOF'
-import re, sys
+import re
 path = 'fs/namespace.c'
 with open(path) as f: c = f.read()
-if 'susfs_is_current_ksu_domain' in c: sys.exit(0)
-anchor1 = '#include "internal.h"\n'
-bloc1 = '\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#define CL_COPY_MNT_NS BIT(25)\n#endif\n'
-c = c.replace(anchor1, anchor1 + bloc1, 1)
-pattern = r'(struct vfsmount \*vfs_kern_mount\([^)]*\)\s*\{.*?if \(!type\)\s*\n\s*return ERR_PTR\(-EINVAL\);\s*\n)'
-match = re.search(pattern, c, re.DOTALL)
-bloc2 = '\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n'
-c = c[:match.end()] + bloc2 + c[match.end():]
-pattern2 = r'(mnt = alloc_vfsmnt\(name\);\s*\n)'
-match2 = re.search(pattern2, c)
-label = '\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif\n'
-c = c[:match2.end()] + label + c[match2.end():]
+done = []
+
+# (1) includes et déclarations externes (bloc #1 du patch)
+if 'susfs_is_current_ksu_domain' not in c:
+    anchor1 = '#include "internal.h"\n'
+    bloc1 = ('\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif\n'
+             '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+             'extern bool susfs_is_current_ksu_domain(void);\n'
+             'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
+             '#define CL_COPY_MNT_NS BIT(25)\n#endif\n')
+    c = c.replace(anchor1, anchor1 + bloc1, 1)
+    done.append('includes/externs')
+
+# (2) hook dans vfs_kern_mount (bloc #6 du patch). Le contexte du patch attend
+#     "return ERR_PTR(-ENODEV)" ; selon le noyau c'est -EINVAL ou -ENODEV.
+if 'susfs_alloc_non_unshare_ksu_vfsmnt(name' not in c:
+    pattern = r'(vfs_kern_mount\([^)]*\)\s*\{.*?if \(!type\)\s*\n\s*return ERR_PTR\(-E\w+\);\s*\n)'
+    match = re.search(pattern, c, re.DOTALL)
+    if match:
+        bloc2 = ('\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                 '\tif (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {\n'
+                 '\t\tif (susfs_is_current_ksu_domain()) {\n'
+                 '\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ?:"none");\n'
+                 '\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n')
+        c = c[:match.end()] + bloc2 + c[match.end():]
+        m2 = re.compile(r'mnt = alloc_vfsmnt\(name\);\s*\n').search(c, match.end() + len(bloc2))
+        if m2:
+            label = '\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif\n'
+            c = c[:m2.end()] + label + c[m2.end():]
+            done.append('hook vfs_kern_mount')
+        else:
+            print("  ⚠️ vfs_kern_mount : appel alloc_vfsmnt(name) introuvable, hook non injecté")
+            c = c[:match.end()] + c[match.end() + len(bloc2):]
+    else:
+        print("  ⚠️ vfs_kern_mount : motif introuvable, hook non injecté")
+
 with open(path, 'w') as f: f.write(c)
+print("  namespace.c : injecté = " + (", ".join(done) if done else "rien (déjà présent)"))
 PYEOF
 
 python3 - <<'PYEOF'
@@ -302,12 +386,7 @@ if [ -f "$GITHUB_WORKSPACE/patches/susfs_inline_hook_patches.sh" ]; then
     cp "$GITHUB_WORKSPACE/patches/susfs_inline_hook_patches.sh" /tmp/susfs_inline_hook_patches.sh
     echo "Script de hooks : copie locale du dépôt (patches/)" | tee -a "$AUDIT"
 else
-    if [ -f "$GITHUB_WORKSPACE/patches/susfs_inline_hook_patches.sh" ]; then
-    cp "$GITHUB_WORKSPACE/patches/susfs_inline_hook_patches.sh" /tmp/susfs_inline_hook_patches.sh
-    echo "Script de hooks : copie locale épinglée (patches/susfs_inline_hook_patches.sh)" | tee -a "$AUDIT"
-else
     curl -LSsf "$BASE_JACK/susfs_inline_hook_patches.sh" -o /tmp/susfs_inline_hook_patches.sh || exit 1
-fi
     echo "Script de hooks : téléchargé depuis la branche mainline (non figé)" | tee -a "$AUDIT"
 fi
 chmod +x /tmp/susfs_inline_hook_patches.sh
@@ -647,11 +726,11 @@ echo "✅ config validée"
 {
     echo ""
     echo "=== CONTRÔLE fs/susfs.c ==="
-    echo "fs/susfs.c APRÈS patch : $(wc -l < fs/susfs.c) lignes, sha256 $(sha256sum fs/susfs.c | cut -c1-16)"
+    [ -f fs/susfs.c ] && echo "fs/susfs.c APRÈS patch : $(wc -l < fs/susfs.c) lignes, sha256 $(sha256sum fs/susfs.c | cut -c1-16)" || echo "⚠️ fs/susfs.c absent"
     grep -n "PRIORITY_UID_FILTER" fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h drivers/kernelsu/Kconfig 2>/dev/null | head -30 || true
     grep -E "PRIORITY_UID_FILTER" out/.config || echo "PRIORITY_UID_FILTER absent de .config"
     echo "--- 25 dernières lignes de fs/susfs.c"
-    tail -n 25 fs/susfs.c
+    tail -n 25 fs/susfs.c 2>/dev/null || true
     echo "--- définitions / déclarations des fonctions priority"
     grep -rn "susfs_parse_priority_app_strings\|susfs_set_priority_uid_filter" fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h drivers/kernelsu 2>/dev/null | head -20 || true
     true
