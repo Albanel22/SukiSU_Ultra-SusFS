@@ -23,6 +23,8 @@ VER="v7.60-dev"
 # Fonctions SuSFS supplémentaires à essayer (1 = activer, 0 = désactiver)
 SUSFS_SUS_MOUNT="${SUSFS_SUS_MOUNT:-1}"
 SUSFS_OPEN_REDIRECT="${SUSFS_OPEN_REDIRECT:-1}"
+# Fonction SuSFS 2.3.0 « priority uid filter » (1 = activée et réparée, 0 = désactivée avec stubs)
+SUSFS_PRIORITY_UID_FILTER="${SUSFS_PRIORITY_UID_FILTER:-1}"
 
 mkdir -p "$GITHUB_WORKSPACE/output"
 AUDIT="$GITHUB_WORKSPACE/output/audit-${VER}.txt"
@@ -136,7 +138,24 @@ echo ""
 echo "=== Patch SUSFS 4.19 ==="
 BASE_JACK="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches"
 SUSFS_PATCH="/tmp/susfs_patch_to_4.19.patch"
-curl -LSsf "$BASE_JACK/Patch/susfs_patch_to_4.19.patch" -o "$SUSFS_PATCH" || { echo "❌ download échoué"; exit 1; }
+# Un exemplaire placé dans le dépôt (patches/) est prioritaire : il fige la version du patch,
+# alors que la branche "mainline" de Jack change sans prévenir.
+if [ -f "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" ]; then
+    cp "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" "$SUSFS_PATCH"
+    echo "Patch SuSFS : copie locale du dépôt (patches/)" | tee -a "$AUDIT"
+else
+    if [ -f "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" ]; then
+    cp "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" "$SUSFS_PATCH"
+    echo "Patch SuSFS : copie locale épinglée (patches/susfs_patch_to_4.19.patch)" | tee -a "$AUDIT"
+else
+    curl -LSsf "$BASE_JACK/Patch/susfs_patch_to_4.19.patch" -o "$SUSFS_PATCH" || { echo "❌ download échoué"; exit 1; }
+    echo "Patch SuSFS : téléchargé depuis la branche mainline (non épinglé)" | tee -a "$AUDIT"
+fi
+    echo "Patch SuSFS : téléchargé depuis la branche mainline (non figé)" | tee -a "$AUDIT"
+fi
+cp "$SUSFS_PATCH" "$GITHUB_WORKSPACE/output/" 2>/dev/null || true
+echo "sha256 patch SuSFS : $(sha256sum "$SUSFS_PATCH" | cut -d' ' -f1)" | tee -a "$AUDIT"
+echo "fs/susfs.c AVANT patch : $(wc -l < fs/susfs.c 2>/dev/null || echo absent) lignes, sha256 $(sha256sum fs/susfs.c 2>/dev/null | cut -c1-16)" | tee -a "$AUDIT"
 
 if patch -p1 --forward --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; then
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1
@@ -154,6 +173,10 @@ mapfile -t REJS < <(find . -name "*.rej" | sort)
 echo "${#REJS[@]} fichier(s) .rej à retraiter"
 for rej in "${REJS[@]}"; do
     base="${rej%.rej}"
+    case "$base" in
+        ./fs/namespace.c|./fs/super.c|./fs/proc/task_mmu.c|./mm/memory.c) ;;
+        *) echo "  ⏭️ $base : hors liste, non retraité"; continue ;;
+    esac
     if patch -F3 --forward --no-backup-if-mismatch "$base" < "$rej" > /tmp/retry.log 2>&1; then
         echo "  ✅ $base : blocs appliqués avec fuzz"
         rm -f "$rej"
@@ -275,8 +298,21 @@ PYEOF
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== Hooks inline (susfs_inline_hook_patches.sh) ==="
-curl -LSsf "$BASE_JACK/susfs_inline_hook_patches.sh" -o /tmp/susfs_inline_hook_patches.sh || exit 1
+if [ -f "$GITHUB_WORKSPACE/patches/susfs_inline_hook_patches.sh" ]; then
+    cp "$GITHUB_WORKSPACE/patches/susfs_inline_hook_patches.sh" /tmp/susfs_inline_hook_patches.sh
+    echo "Script de hooks : copie locale du dépôt (patches/)" | tee -a "$AUDIT"
+else
+    if [ -f "$GITHUB_WORKSPACE/patches/susfs_inline_hook_patches.sh" ]; then
+    cp "$GITHUB_WORKSPACE/patches/susfs_inline_hook_patches.sh" /tmp/susfs_inline_hook_patches.sh
+    echo "Script de hooks : copie locale épinglée (patches/susfs_inline_hook_patches.sh)" | tee -a "$AUDIT"
+else
+    curl -LSsf "$BASE_JACK/susfs_inline_hook_patches.sh" -o /tmp/susfs_inline_hook_patches.sh || exit 1
+fi
+    echo "Script de hooks : téléchargé depuis la branche mainline (non figé)" | tee -a "$AUDIT"
+fi
 chmod +x /tmp/susfs_inline_hook_patches.sh
+cp /tmp/susfs_inline_hook_patches.sh "$GITHUB_WORKSPACE/output/" 2>/dev/null || true
+echo "sha256 script de hooks : $(sha256sum /tmp/susfs_inline_hook_patches.sh | cut -d' ' -f1)" | tee -a "$AUDIT"
 bash /tmp/susfs_inline_hook_patches.sh || exit 1
 
 # -----------------------------------------------------------------------------
@@ -605,6 +641,76 @@ echo "✅ config validée"
 } 2>&1 | tee -a "$AUDIT"
 
 # -----------------------------------------------------------------------------
+# 4c. Contrôle de fs/susfs.c (directives non fermées, fonctions "priority uid filter")
+#     SUSFS_AUTOREPAIR=0 pour ne rien réparer automatiquement.
+# -----------------------------------------------------------------------------
+{
+    echo ""
+    echo "=== CONTRÔLE fs/susfs.c ==="
+    echo "fs/susfs.c APRÈS patch : $(wc -l < fs/susfs.c) lignes, sha256 $(sha256sum fs/susfs.c | cut -c1-16)"
+    grep -n "PRIORITY_UID_FILTER" fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h drivers/kernelsu/Kconfig 2>/dev/null | head -30 || true
+    grep -E "PRIORITY_UID_FILTER" out/.config || echo "PRIORITY_UID_FILTER absent de .config"
+    echo "--- 25 dernières lignes de fs/susfs.c"
+    tail -n 25 fs/susfs.c
+    echo "--- définitions / déclarations des fonctions priority"
+    grep -rn "susfs_parse_priority_app_strings\|susfs_set_priority_uid_filter" fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h drivers/kernelsu 2>/dev/null | head -20 || true
+    true
+} 2>&1 | tee -a "$AUDIT"
+
+PRIO_FLAG=""
+rm -f "$GITHUB_WORKSPACE/.susfs_prio_define"
+SUSFS_AUTOREPAIR="${SUSFS_AUTOREPAIR:-1}" SUSFS_PRIORITY_UID_FILTER="$SUSFS_PRIORITY_UID_FILTER" python3 - <<'PYEOF' 2>&1 | tee -a "$AUDIT"
+import os, re
+repair = os.environ.get('SUSFS_AUTOREPAIR', '1') == '1'
+prio_on = os.environ.get('SUSFS_PRIORITY_UID_FILTER', '1') == '1'
+p = 'fs/susfs.c'
+c = open(p).read()
+lines = c.split('\n')
+
+# a) équilibre des directives du préprocesseur
+stack, extra = [], 0
+for i, line in enumerate(lines, 1):
+    m = re.match(r'\s*#\s*(ifdef|ifndef|if|endif)\b', line)
+    if not m: continue
+    if m.group(1) == 'endif':
+        if stack: stack.pop()
+        else: extra += 1
+    else:
+        stack.append(i)
+print(f"  équilibre des directives : {len(stack)} non fermée(s) {stack}, {extra} #endif en trop")
+if stack and repair:
+    marker = '/* susfs avc log spoofing */'
+    opener = lines[stack[-1] - 1] if len(stack) == 1 else ''
+    if len(stack) == 1 and 'PRIORITY_UID_FILTER' in opener and marker in c:
+        # le bloc « priority uid filter » doit se terminer juste avant la suite du fichier
+        c = c.replace(marker, '#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n\n' + marker, 1)
+        print("  🔧 #endif inséré avant « susfs avc log spoofing » (fin du bloc priority uid filter)")
+    else:
+        c = c.rstrip('\n') + '\n' + '#endif /* SUSFS_AUTOREPAIR */\n' * len(stack)
+        print(f"  🔧 {len(stack)} #endif ajouté(s) en fin de fichier (position non vérifiée)")
+    open(p, 'w').write(c)
+
+# b) fonction « priority uid filter » : activée, ou remplacée par des stubs
+if prio_on:
+    open(os.path.join(os.environ.get('GITHUB_WORKSPACE', '.'), '.susfs_prio_define'), 'w').write('1')
+    print("  ✅ priority uid filter ACTIVÉ (-DCONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=1)")
+elif repair:
+    hdrs = [h for h in ('include/linux/susfs.h', 'include/linux/susfs_def.h') if os.path.exists(h)]
+    stubs = {
+        'susfs_set_priority_uid_filter': '#define susfs_set_priority_uid_filter(arg) ((void)(arg))',
+        'susfs_parse_priority_app_strings': '#define susfs_parse_priority_app_strings() do { } while (0)',
+    }
+    for name, stub in stubs.items():
+        for h in hdrs:
+            open(h, 'a').write(f"\n/* SUSFS_AUTOREPAIR : fonction désactivée, stub sans effet */\n#ifndef {name}\n{stub}\n#endif\n")
+    print("  ✅ priority uid filter DÉSACTIVÉ : stubs sans effet ajoutés aux headers")
+PYEOF
+if [ -f "$GITHUB_WORKSPACE/.susfs_prio_define" ]; then
+    PRIO_FLAG="-DCONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=1"
+fi
+echo "PRIO_FLAG='$PRIO_FLAG'" | tee -a "$AUDIT"
+
+# -----------------------------------------------------------------------------
 # 5. Patchs Motorola
 # -----------------------------------------------------------------------------
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
@@ -620,7 +726,7 @@ echo ""
 echo "=== Compilation ==="
 set +eo pipefail
 make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-  KCFLAGS="-Wno-unused-variable -Wno-declaration-after-statement" \
+  KCFLAGS="-Wno-unused-variable -Wno-declaration-after-statement $PRIO_FLAG" \
   -k -j$(nproc) Image 2>&1 | tee build.log
 MAKE_RC=${PIPESTATUS[0]}
 set -eo pipefail
