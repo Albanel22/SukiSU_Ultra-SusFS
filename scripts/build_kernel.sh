@@ -38,10 +38,26 @@ cd "$GITHUB_WORKSPACE"
 # -----------------------------------------------------------------------------
 # 1. Clone noyau
 # -----------------------------------------------------------------------------
-git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git \
-  -b lineage-23.2 --depth=1 kernel_sources
-cd kernel_sources
-git log --oneline -1
+# La branche lineage-23.2 évolue : on fige la source sur le commit qui a donné un build valide.
+# Vide = dernière version de la branche (peut casser, voir README).
+KERNEL_PIN="${KERNEL_PIN:-9426323c2ac}"
+KERNEL_URL="https://github.com/LineageOS/android_kernel_motorola_sm8250.git"
+if [ -n "$KERNEL_PIN" ]; then
+    git clone --filter=blob:none --no-checkout -b lineage-23.2 "$KERNEL_URL" kernel_sources
+    cd kernel_sources
+    echo "Tête actuelle de lineage-23.2 : $(git log --oneline -1 origin/lineage-23.2)" | tee -a "$AUDIT"
+    if ! git checkout -q "$KERNEL_PIN" 2>/dev/null; then
+        echo "⚠️ $KERNEL_PIN absent de lineage-23.2, recherche dans les autres branches..." | tee -a "$AUDIT"
+        git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
+        git checkout -q "$KERNEL_PIN" || { echo "❌ commit $KERNEL_PIN introuvable dans le dépôt"; exit 1; }
+    fi
+    echo "Source figée sur : $KERNEL_PIN" | tee -a "$AUDIT"
+else
+    git clone "$KERNEL_URL" -b lineage-23.2 --depth=1 kernel_sources
+    cd kernel_sources
+fi
+git log --oneline -1 | tee -a "$AUDIT"
+echo "SHA complet de la source : $(git rev-parse HEAD)" | tee -a "$AUDIT"
 
 # -----------------------------------------------------------------------------
 # 2. SukiSU-Ultra builtin
@@ -58,7 +74,7 @@ echo "✅ SukiSU-Ultra intégré"
 
 # Option : figer le driver sur un commit précis (test A/B). Vide = dernier commit.
 # Exemple : SUKI_PIN="${SUKI_PIN:-b5917072}"
-SUKI_PIN="${SUKI_PIN:-b5917072}"
+SUKI_PIN="${SUKI_PIN:-}"
 if [ -n "$SUKI_PIN" ] && [ -e KernelSU/.git ]; then
     git -C KernelSU fetch --unshallow 2>/dev/null || git -C KernelSU fetch --all --tags 2>/dev/null || true
     if git -C KernelSU checkout "$SUKI_PIN" 2>/dev/null; then
@@ -305,6 +321,49 @@ except FileNotFoundError: pass
 PYEOF
 
 # -----------------------------------------------------------------------------
+# 3c. Fallback détection manager (ne dépend plus des SID zygote en mode SuSFS)
+#     Hypothèse à tester : susfs_zygote_sid reste à 0 -> le manager ne reçoit
+#     ni disable_seccomp() ni ksu_install_fd(). MANAGER_FALLBACK=0 pour désactiver.
+# -----------------------------------------------------------------------------
+MANAGER_FALLBACK="${MANAGER_FALLBACK:-1}"
+if [ "$MANAGER_FALLBACK" = "1" ]; then
+echo ""
+echo "=== Fallback détection manager (lsm_hook.c) ==="
+python3 - <<'PYEOF'
+import re, sys
+path = 'drivers/kernelsu/hook/lsm_hook.c'
+try:
+    with open(path) as f: c = f.read()
+except FileNotFoundError:
+    print("  ⚠️ lsm_hook.c introuvable, skip")
+    sys.exit(0)
+if 'MGR_FALLBACK' in c:
+    print("  ↻ déjà patché")
+    sys.exit(0)
+pattern = (r'int\s+ksu_handle_setresuid\s*\(\s*uid_t\s+ruid\s*,\s*uid_t\s+euid\s*,\s*uid_t\s+suid\s*\)\s*\{'
+           r'\s*uid_t\s+cur_uid\s*=\s*current_uid\(\)\.val;\s*if\s*\(\s*cur_uid\s*!=\s*0\s*\)\s*return\s+0;')
+m = re.search(pattern, c)
+if not m:
+    print("  ⚠️ motif ksu_handle_setresuid introuvable, skip")
+    sys.exit(0)
+block = '''
+
+    /* MGR_FALLBACK : manager reconnu sans dependre des SID zygote */
+    if (likely(ksu_is_manager_appid_valid()) && unlikely(is_uid_manager(ruid))) {
+        disable_seccomp();
+        pr_info("install fd for manager (fallback): %d\\n", ruid);
+        ksu_install_fd();
+        return 0;
+    }
+'''
+c = c[:m.end()] + block + c[m.end():]
+with open(path, 'w') as f: f.write(c)
+print("  ✅ fallback manager injecté dans ksu_handle_setresuid")
+PYEOF
+grep -n "MGR_FALLBACK" drivers/kernelsu/hook/lsm_hook.c || echo "  ⚠️ fallback non appliqué"
+fi
+
+# -----------------------------------------------------------------------------
 # 4. Config
 # -----------------------------------------------------------------------------
 echo ""
@@ -314,8 +373,29 @@ export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
+# --- Compatibilité clang : le noyau peut passer des -Wno-... inconnus d'un clang ancien
+CLANG_MAJOR=$(clang --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p' | head -1)
+echo "clang version majeure : ${CLANG_MAJOR:-inconnue}" | tee -a "$AUDIT"
+CC_ARGS=""
+if [ "${FORCE_CLANG_WRAP:-0}" = "1" ] || [ "${CLANG_MAJOR:-99}" -lt 16 ]; then
+    cat > "$GITHUB_WORKSPACE/clang-wrap" <<'WRAPEOF'
+#!/bin/bash
+args=()
+for a in "$@"; do
+    case "$a" in
+        -Wno-cast-function-type-strict|-Wcast-function-type-strict) ;;
+        *) args+=("$a") ;;
+    esac
+done
+exec clang -Wno-unknown-warning-option "${args[@]}" -Wno-unknown-warning-option
+WRAPEOF
+    chmod +x "$GITHUB_WORKSPACE/clang-wrap"
+    CC_ARGS="CC=$GITHUB_WORKSPACE/clang-wrap"
+    echo "⚠️ clang < 16 : wrapper actif (flags inconnus ignorés)" | tee -a "$AUDIT"
+fi
+
 mkdir -p out
-make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
+make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
 
 cat >> out/.config <<'EOF'
 CONFIG_KSU=y
@@ -342,7 +422,7 @@ CONFIG_COMPAT_32BIT_TIME=y
 CONFIG_THREAD_INFO_IN_TASK=y
 EOF
 
-make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
+make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
 
 grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU droppé"; exit 1; }
 grep -q '^CONFIG_KSU_SUSFS=y' out/.config || { echo "❌ SUSFS droppé"; exit 1; }
@@ -415,8 +495,34 @@ echo "✅ config validée"
     sed -n '50,80p' drivers/kernelsu/policy/app_profile.c || true
 
     echo ""
-    echo "=== Makefile du driver ==="
-    grep -n "lsm_hook\|hook/\|supercall\|dispatch\|app_profile" drivers/kernelsu/Makefile || true
+    echo "=== SID zygote (chemin setresuid en mode SuSFS) ==="
+    grep -rn "susfs_zygote_sid\|susfs_zygote_next_sid" fs include/linux drivers/kernelsu security 2>/dev/null | head -40 || true
+    echo "--- susfs_is_sid_equal"
+    grep -rn "susfs_is_sid_equal" fs include/linux drivers/kernelsu 2>/dev/null | head -10 || true
+    echo "--- selinux.c : initialisation des SID (lignes 250-345)"
+    sed -n '250,345p' drivers/kernelsu/selinux/selinux.c || true
+    echo "--- appelants de l'init des SID"
+    grep -rn "KERNEL_ZYGOTE_DOMAIN\|susfs_set_sid\|susfs_init_sids\|setup_selinux\|cache_sid" drivers/kernelsu | head -30 || true
+    echo "--- ksud.c autour de track_throne"
+    sed -n '70,125p' drivers/kernelsu/runtime/ksud.c || true
+    echo "--- pkg_observer.c"
+    sed -n '1,80p' drivers/kernelsu/manager/pkg_observer.c || true
+    echo "--- selinux.c : cache_sid (lignes 125-165)"
+    sed -n '125,165p' drivers/kernelsu/selinux/selinux.c || true
+    echo "--- appelants de susfs_set_batch_sid"
+    grep -rn "susfs_set_batch_sid" drivers/kernelsu fs include 2>/dev/null | head -10 || true
+    echo "--- ksud.c autour des cache_sid (195-215 et 283-335)"
+    sed -n '195,215p;283,335p' drivers/kernelsu/runtime/ksud.c || true
+
+    echo ""
+    echo "=== Enregistrement du manager (appid / throne tracker) ==="
+    grep -rn "ksu_is_manager_appid_valid\|ksu_set_manager_appid\|ksu_manager_appid" drivers/kernelsu | head -30 || true
+    grep -rn "track_throne" drivers/kernelsu | head -20 || true
+
+    echo ""
+    echo "=== Makefile du driver (lsm_hook compilé ?) ==="
+    ls drivers/kernelsu || true
+    grep -rn "lsm_hook\|hook/" drivers/kernelsu --include=Makefile --include=Kbuild --include=*.mk | head -20 || true
 
     echo ""
     echo "=== Kconfig du driver (symboles SuSFS / hook) ==="
@@ -449,7 +555,7 @@ fi
 echo ""
 echo "=== Compilation ==="
 set +eo pipefail
-make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   KCFLAGS="-Wno-unused-variable -Wno-declaration-after-statement" \
   -j$(nproc) Image 2>&1 | tee build.log
 MAKE_RC=${PIPESTATUS[0]}
