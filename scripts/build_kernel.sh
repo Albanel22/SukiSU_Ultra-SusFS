@@ -45,10 +45,26 @@ cd "$GITHUB_WORKSPACE"
 # -----------------------------------------------------------------------------
 # 1. Clone noyau
 # -----------------------------------------------------------------------------
-git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git \
-  -b lineage-23.2 --depth=1 kernel_sources
-cd kernel_sources
-git log --oneline -1
+# La branche lineage-23.2 évolue : on fige la source sur le commit qui a donné un build valide.
+# Vide = dernière version de la branche (peut casser, voir README).
+KERNEL_PIN="${KERNEL_PIN:-9426323c2ac}"
+KERNEL_URL="https://github.com/LineageOS/android_kernel_motorola_sm8250.git"
+if [ -n "$KERNEL_PIN" ]; then
+    git clone --filter=blob:none --no-checkout -b lineage-23.2 "$KERNEL_URL" kernel_sources
+    cd kernel_sources
+    echo "Tête actuelle de lineage-23.2 : $(git log --oneline -1 origin/lineage-23.2)" | tee -a "$AUDIT"
+    if ! git checkout -q "$KERNEL_PIN" 2>/dev/null; then
+        echo "⚠️ $KERNEL_PIN absent de lineage-23.2, recherche dans les autres branches..." | tee -a "$AUDIT"
+        git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
+        git checkout -q "$KERNEL_PIN" || { echo "❌ commit $KERNEL_PIN introuvable dans le dépôt"; exit 1; }
+    fi
+    echo "Source figée sur : $KERNEL_PIN" | tee -a "$AUDIT"
+else
+    git clone "$KERNEL_URL" -b lineage-23.2 --depth=1 kernel_sources
+    cd kernel_sources
+fi
+git log --oneline -1 | tee -a "$AUDIT"
+echo "SHA complet de la source : $(git rev-parse HEAD)" | tee -a "$AUDIT"
 
 # -----------------------------------------------------------------------------
 # 2. SukiSU-Ultra builtin
@@ -385,8 +401,31 @@ export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
+# --- Compatibilité clang : le noyau peut passer des -Wno-... inconnus d'un clang ancien
+CLANG_MAJOR=$(clang --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p' | head -1)
+echo "clang : $(command -v clang) -> $(readlink -f "$(command -v clang)")" | tee -a "$AUDIT"
+clang --version | head -2 | tee -a "$AUDIT"
+echo "clang version majeure : ${CLANG_MAJOR:-inconnue}" | tee -a "$AUDIT"
+CC_ARGS=""
+if [ "${FORCE_CLANG_WRAP:-1}" = "1" ] || [ "${CLANG_MAJOR:-99}" -lt 16 ]; then
+    cat > "$GITHUB_WORKSPACE/clang-wrap" <<'WRAPEOF'
+#!/bin/bash
+args=()
+for a in "$@"; do
+    case "$a" in
+        -Wno-cast-function-type-strict|-Wcast-function-type-strict) ;;
+        *) args+=("$a") ;;
+    esac
+done
+exec clang -Wno-unknown-warning-option "${args[@]}" -Wno-unknown-warning-option
+WRAPEOF
+    chmod +x "$GITHUB_WORKSPACE/clang-wrap"
+    CC_ARGS="CC=$GITHUB_WORKSPACE/clang-wrap"
+    echo "⚠️ clang < 16 : wrapper actif (flags inconnus ignorés)" | tee -a "$AUDIT"
+fi
+
 mkdir -p out
-make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
+make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
 
 cat >> out/.config <<'EOF'
 CONFIG_KSU=y
@@ -420,7 +459,7 @@ if [ "$SUSFS_OPEN_REDIRECT" = "1" ]; then
     sed -i 's/^# CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set/CONFIG_KSU_SUSFS_OPEN_REDIRECT=y/' out/.config
 fi
 
-make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
+make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -3
 
 grep -q '^CONFIG_KSU=y' out/.config || { echo "❌ KSU droppé"; exit 1; }
 grep -q '^CONFIG_KSU_SUSFS=y' out/.config || { echo "❌ SUSFS droppé"; exit 1; }
@@ -560,7 +599,7 @@ fi
 echo ""
 echo "=== Compilation ==="
 set +eo pipefail
-make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
   KCFLAGS="-Wno-unused-variable -Wno-declaration-after-statement" \
   -j$(nproc) Image 2>&1 | tee build.log
 MAKE_RC=${PIPESTATUS[0]}
