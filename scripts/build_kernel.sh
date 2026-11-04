@@ -2,9 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V7.60-dev : BRANCHE D'ESSAI "SuSFS complet" (base = V7.59 qui fonctionne)
+# V7.60 : SuSFS complet (SUS_MOUNT, OPEN_REDIRECT, priority uid filter) — validé sur l'appareil
+#   base = V7.59 qui fonctionne
 #   Objectif : récupérer les blocs du patch SuSFS rejetés + activer SUS_MOUNT / OPEN_REDIRECT
-#   NE PAS flasher directement : tester avec "fastboot boot" d'abord.
+#   Conseil : tester avec "fastboot boot" avant de flasher.
 #   Base : SukiSU-Ultra + SuSFS (patch Jack) + ksud épinglé sur le commit du driver
 #   Changements vs V7.58 :
 #   - dernière ligne corrigée (guillemet non fermé -> exit 2)
@@ -14,11 +15,11 @@ set -euo pipefail
 #     output/audit-v7.59.txt  (aucun effet sur le build)
 # =============================================================================
 
-echo "=== Build SukiSU-Ultra — V7.60-dev (SuSFS complet) ==="
+echo "=== Build SukiSU-Ultra — V7.60 (SuSFS complet) ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
-VER="v7.60-dev"
+VER="v7.60"
 
 # Fonctions SuSFS supplémentaires à essayer (1 = activer, 0 = désactiver)
 SUSFS_SUS_MOUNT="${SUSFS_SUS_MOUNT:-1}"
