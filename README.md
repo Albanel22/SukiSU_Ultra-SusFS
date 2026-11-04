@@ -48,15 +48,17 @@ Ce dépôt documente une recette qui **fonctionne**, avec le script de build com
 
 ## ✅ Résultat
 
-Capturé sur l'appareil, dans le manager SukiSU :
+Capturé sur l'appareil, dans le manager SukiSU, avec la version **V7.60** (SuSFS complet) :
 
 | Élément | Valeur affichée |
 |---|---|
 | État | **Fonctionnel** |
-| Version du gestionnaire | `v4.3.0 (41100-6)` |
-| Version du noyau | `4.19.325-cip136-st20-perf-g9426323c2ac-dirty` |
-| Kernel full version | `v4.3.0-b5917072@HEAD` |
+| Version affichée | `41141-6` |
+| Version du gestionnaire | `v4.3.0-r1 (41140-6)` |
+| Version du noyau | `4.19.325-g70044101` |
+| Kernel full version | `v4.3.0-r1-b5917072@HEAD` |
 | **SuSFS** | **`v2.3.0 (SUSFS Inline Hook)`** |
+| Zygisk | `Zygisk Next 1.5.2 (864-a4a72ce-release)` |
 | Seccomp status | `Disabled` (c'est le comportement attendu, voir [plus bas](#-comment-le-manager-reconnaît-le-noyau)) |
 | SELinux | `Imposition (enforcing)` |
 | Super-utilisateurs / Modules | 3 / 9 |
@@ -84,10 +86,11 @@ Capturé sur l'appareil, dans le manager SukiSU :
 
 | Fichier | Rôle |
 |---|---|
-| `SukiSU-Ultra-SUSFS-v7.59-boot.img` | L'image à flasher : `boot.img` d'origine **repackée** avec le nouveau noyau, `ksud` et `su` |
-| `Image-v7.59-susfs` | Le noyau brut compilé (sans repack) |
-| `System.map-v7.59-susfs` | Table des symboles, utile pour vérifier ce qui est réellement compilé |
-| `audit-v7.59.txt` | Rapport généré à chaque build : hooks, config, symboles SuSFS, révisions utilisées |
+| `SukiSU-Ultra-SUSFS-v7.60-boot.img` | L'image à flasher : `boot.img` d'origine **repackée** avec le nouveau noyau, `ksud` et `su` |
+| `Image-v7.60-susfs` | Le noyau brut compilé (sans repack) |
+| `System.map-v7.60-susfs` | Table des symboles, utile pour vérifier ce qui est réellement compilé |
+| `audit-v7.60.txt` | Rapport généré à chaque build : hooks, config, symboles SuSFS, révisions utilisées, empreintes des patchs |
+| `susfs_patch_to_4.19.patch`, `susfs_inline_hook_patches.sh` | Les copies exactes des deux fichiers externes utilisés par le build (à garder dans `patches/` pour reproduire) |
 | `build_kernel.sh` | Le script de build complet |
 
 ---
@@ -98,7 +101,7 @@ Capturé sur l'appareil, dans le manager SukiSU :
 
 ```bash
 adb reboot bootloader
-fastboot boot SukiSU-Ultra-SUSFS-v7.59-boot.img
+fastboot boot SukiSU-Ultra-SUSFS-v7.60-boot.img
 ```
 
 Si le téléphone démarre normalement, tout va bien. Un simple redémarrage te ramène sur ton ancien `boot.img`.
@@ -107,7 +110,7 @@ Si le téléphone démarre normalement, tout va bien. Un simple redémarrage te 
 
 ```bash
 fastboot getvar current-slot          # si ton appareil est en A/B
-fastboot flash boot SukiSU-Ultra-SUSFS-v7.59-boot.img
+fastboot flash boot SukiSU-Ultra-SUSFS-v7.60-boot.img
 # ou, selon l'appareil : fastboot flash boot_a / boot_b
 fastboot reboot
 ```
@@ -115,7 +118,7 @@ fastboot reboot
 ### 3. Installer le bon manager
 
 > [!IMPORTANT]
-> Utilise le manager **SukiSU v4.3.0 (41100-6)**, variante **standard**, et **pas** la variante « *spoofed* ».
+> Utilise le manager **SukiSU v4.3.0-r1 (41140-6)** (testé avec cette version ; la v4.3.0 (41100-6) a été validée avec la V7.59), variante **standard**, et **pas** la variante « *spoofed* ».
 > Le driver ne reconnaît que le package et la signature d'origine : un APK au package modifié ne sera jamais enregistré comme manager, et tu obtiendras *« Non pris en charge »* alors que le noyau est sain.
 
 - Désinstalle l'ancien manager avant d'installer celui-ci pour éviter un conflit de signature.
@@ -165,15 +168,23 @@ jobs:
 ```
 
 > [!TIP]
-> `if: always()` est précieux : ainsi tu récupères `audit-v7.59.txt` même quand le build échoue, et tu sais où ça a cassé.
+> `if: always()` est précieux : ainsi tu récupères `audit-v7.60.txt` même quand le build échoue, et tu sais où ça a cassé.
 
-### Les deux variables importantes
+### Les variables importantes
 
 | Variable | Défaut | Effet |
 |---|---|---|
 | `SUKI_PIN` | *(vide)* | Fige le driver SukiSU sur un commit précis. **Laisse-la à `b5917072`.** Vide, le script prend le dernier commit de la branche `builtin`, et c'est ce qui nous a donné *« Non pris en charge »*. |
 | `KERNEL_PIN` | `9426323c2acd0865fd565a6dd8a9f39f831cbec3` | Fige la **source du noyau** sur le commit validé (branche `lineage-23.2`). Vide, le script prend la dernière version de la branche, qui peut changer d'un jour à l'autre. |
+| `SUSFS_SUS_MOUNT` | `1` | Active `CONFIG_KSU_SUSFS_SUS_MOUNT` (masquage des montages). `0` pour le désactiver. |
+| `SUSFS_OPEN_REDIRECT` | `1` | Active `CONFIG_KSU_SUSFS_OPEN_REDIRECT`. `0` pour le désactiver. |
+| `SUSFS_PRIORITY_UID_FILTER` | `1` | Active la fonction SuSFS 2.3.0 « priority uid filter » (et corrige le `#endif` manquant du patch). `0` la remplace par des stubs sans effet. |
+| `SUSFS_PATCH_FALLBACK` | `1` | Si `fs/susfs.c` est absent après le patch local, retente avec le patch de la branche `mainline`. |
 | `MANAGER_FALLBACK` | `1` | Injecte un correctif qui reconnaît le manager sans dépendre des SID zygote (voir [explication](#-comment-le-manager-reconnaît-le-noyau)). Mets `0` pour désactiver. |
+
+### Le dossier `patches/` (build reproductible)
+
+Mets dans `patches/` les **copies exactes** de `susfs_patch_to_4.19.patch` et `susfs_inline_hook_patches.sh` (récupère-les dans les artefacts d'un build, ne les recopie pas à la main). Le script les utilise à la place des versions de la branche `mainline`, qui changent sans prévenir. Avant de les appliquer, il vérifie l'intégrité du patch (chaque bloc doit avoir la taille annoncée) et affiche son empreinte `sha256`.
 
 ---
 
@@ -185,13 +196,14 @@ jobs:
 | **1** | Clone `LineageOS/android_kernel_motorola_sm8250`, branche `lineage-23.2` |
 | **2** | Intègre **SukiSU-Ultra** en *builtin* via son `setup.sh`, puis relève (et fige si `SUKI_PIN`) le commit du driver |
 | **2a** | Correctif de détection du manager sur `ksu_install_fd` (`O_CLOEXEC` → `0`) |
-| **2b** | Applique le patch **SuSFS 4.19** (de JackA1ltman), puis complète à la main `fs/namespace.c` et ajoute `susfs.o` à `fs/Makefile` |
+| **2b** | Applique le patch **SuSFS 4.19** (copie de `patches/` ou, à défaut, celui de JackA1ltman) après un contrôle d'intégrité ; **retente les blocs rejetés avec fuzz** (fichiers visés uniquement), complète à la main `fs/namespace.c` (includes et hook de `vfs_kern_mount`, uniquement s'ils manquent) et ajoute `susfs.o` à `fs/Makefile` |
 | **2c** | Supprime la déclaration et l'appel de `susfs_add_sus_avd_allowed_by_type` dans `sepolicy.c` |
 | **3** | Branche les hooks « inline » SuSFS (`execveat`, `faccessat`, `stat`, `reboot`, `setresuid`, `sys_read`, `input_event`) |
 | **3b** | Corrections de compatibilité 4.19 : `static_call.h`, signature de `inotify_fdinfo`, déclarations dans `fs/stat.c`, `vdso_clock_mode`, `access_ok` |
 | **3c** | **Fallback de détection du manager** dans `lsm_hook.c` (voir plus bas) |
 | **4** | Configuration (`vendor/lito-perf_defconfig` + options KSU/SuSFS) avec **validation stricte** : le build échoue si SuSFS est silencieusement supprimé |
-| **4b** | **Audits** écrits dans `output/audit-v7.59.txt` |
+| **4b** | **Audits** écrits dans `output/audit-v7.60.txt` |
+| **4c** | Contrôle de `fs/susfs.c` : ferme le bloc `#ifdef` laissé ouvert par le patch et active « priority uid filter » |
 | **5** | Patchs Motorola : désactive le contrôle de version des modules, ajoute le **stub tactile** dans `msm_drv.c` |
 | **6** | Compile l'`Image` (clang, `LLVM=1`) |
 | **7** | Compile `ksud` (Rust nightly + NDK r26d) |
@@ -214,8 +226,9 @@ CONFIG_KSU_SUSFS_SPOOF_UNAME=y
 CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 CONFIG_KSU_SUSFS_ENABLE_LOG=y
-# CONFIG_KSU_SUSFS_SUS_MOUNT is not set        <- désactivé volontairement
-# CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set    <- désactivé volontairement
+CONFIG_KSU_SUSFS_SUS_MOUNT=y                 <- activé par défaut dans la V7.60 (SUSFS_SUS_MOUNT=0 pour l'éviter)
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y             <- activé par défaut dans la V7.60 (SUSFS_OPEN_REDIRECT=0 pour l'éviter)
+# + -DCONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=1 passé au compilateur (SUSFS_PRIORITY_UID_FILTER=1)
 
 CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
@@ -295,9 +308,11 @@ Le patch SuSFS 4.19 touche une vingtaine de fichiers. Sur cette source, **plusie
 
 | Fichier | Bloc | Conséquence |
 |---|---|---|
-| `fs/namespace.c` | #1 et #6 | Partie `SUS_MOUNT` (désactivée) |
-| `fs/super.c` | #1 | Partie `SUS_MOUNT` (désactivée) |
-| `fs/proc/task_mmu.c` | #7 | Concerne `SUS_MAP`, **activée** : probablement incomplète |
+| `fs/namespace.c` | #1 et #6 | Partie `SUS_MOUNT` (désactivée dans la V7.59, rattrapée dans la V7.60) |
+| `fs/super.c` | #1 | Partie `SUS_MOUNT` (désactivée dans la V7.59, rattrapée dans la V7.60) |
+| `fs/proc/task_mmu.c` | #7 | Concerne `SUS_MAP`, **activée** : incomplète dans la V7.59, rattrapée dans la V7.60 |
+
+**Comment la V7.60 les récupère** : le script garde les blocs rejetés (`rejects-initiaux/`), les réapplique avec une tolérance de contexte (`patch -F3`, uniquement sur `namespace.c`, `super.c`, `task_mmu.c`, `mm/memory.c`), puis complète à la main ce qui manque encore. Le bloc `vfs_kern_mount` de `namespace.c` échouait notamment parce que son contexte attend `return ERR_PTR(-ENODEV)` alors que ce noyau a `-EINVAL` selon les cas : le script accepte les deux variantes.
 
 Autres embûches rencontrées :
 
@@ -320,7 +335,15 @@ Le flag est passé à **toutes** les compilations du noyau, mais le clang du run
 **Leçon : fige aussi la source du noyau**, pas seulement le driver. C'est le rôle de `KERNEL_PIN`. Par sécurité, le script active en plus un petit *wrapper* clang qui ignore les options inconnues quand clang est plus ancien que la version 16.
 
 > [!TIP]
-> Note le SHA complet de ta source après chaque build réussi : `audit-v7.59.txt` l'affiche (`SHA complet de la source`).
+> Note le SHA complet de ta source après chaque build réussi : `audit-v7.60.txt` l'affiche (`SHA complet de la source`).
+
+#### Activer SUS_MOUNT et OPEN_REDIRECT : les erreurs en cascade
+
+Les activer fait apparaître, une par une, des erreurs que la V7.59 évitait. Compiler avec `make -k` (ne pas s'arrêter à la première erreur) et écrire les erreurs dans `output/build-errors.txt` a permis de les voir toutes d'un coup :
+
+- **Macros redéfinies** (`DEFAULT_KSU_MNT_ID`, `DEFAULT_KSU_MNT_GROUP_ID`) : un bloc du patch les redéfinissait avec d'autres valeurs que `susfs_def.h`. Avec `-Werror`, c'est une erreur. Solution : retirer les doublons de `namespace.c`.
+- **Bloc `#ifdef` jamais fermé** et **prototypes manquants** pour « priority uid filter » (voir juste après).
+- **`fs/susfs.c` absent** après le patch quand la copie placée dans `patches/` était **incomplète** : le fichier `fs/susfs.c` est entièrement créé par le patch (2206 lignes). Le script vérifie maintenant que chaque bloc du patch a la taille annoncée, affiche l'empreinte du fichier, et s'arrête (ou retombe sur `mainline`) si `fs/susfs.c` n'existe pas.
 
 #### Le patch SuSFS bouge lui aussi
 
@@ -380,12 +403,12 @@ Le hook d'origine, en mode SuSFS, n'agit que si le processus parent est reconnu 
 
 ## 🚧 Limites connues
 
-- **SuSFS partiel** : `SUS_MOUNT` et `OPEN_REDIRECT` sont désactivés, et des blocs du patch ont échoué ; `SUS_MAP` est probablement incomplet. Les fonctions `SUS_PATH`, `SUS_KSTAT`, le spoof d'`uname` et de la cmdline sont, elles, compilées.
+- **Vérifie ce qui est réellement actif** : la V7.60 active par défaut `SUS_MOUNT`, `OPEN_REDIRECT` et « priority uid filter », mais seul l'audit du build fait foi. Cherche dans `audit-v7.60.txt` les lignes `CONFIG_KSU_SUSFS_SUS_MOUNT actif`, `CONFIG_KSU_SUSFS_OPEN_REDIRECT actif` et `priority uid filter ACTIVÉ`, et vérifie que `rejects-restants/` est vide. Les blocs rattrapés par fuzz sont placés par tolérance de contexte : teste les fonctions que tu utilises.
 - **Fonction supprimée dans `sepolicy.c`** : l'appel à `susfs_add_sus_avd_allowed_by_type` est retiré (étape 2c). Cette fonction **existe** bien dans `fs/susfs.c` dans ce build, donc cette suppression est peut-être devenue inutile. Elle n'a pas été retestée sans.
-- **Chaîne de version différente du stock** : le noyau annonce `…-g9426323c2ac-dirty` (branche `lineage-23.2`), alors que le noyau stock du 20/09/2026 est `…-gc21b90c6860e`. Ça n'a pas empêché le démarrage, mais peut compter pour certains modules.
+- **Chaîne de version différente du stock** : le noyau stock du 20/09/2026 est `…-gc21b90c6860e`, alors que ce build vient d'un autre commit de la branche `lineage-23.2`. Le noyau inclut aussi le **spoof d'`uname`** de SuSFS : la version affichée dans le manager peut donc être modifiée par un module ou un script. Ça n'a pas empêché le démarrage, mais peut compter pour certains modules.
 - **`ksud` et driver de révisions différentes** (voir difficulté n°5).
 - **Dépendance à la date de la ROM** : build validé sur LineageOS 23.2 du **20/09/2026**.
-- **Zygisk Next** peut afficher « redémarrage requis » : un simple reboot suffit.
+- **Zygisk Next** (1.5.2 testé) peut afficher « redémarrage requis » juste après son installation : un simple reboot suffit.
 - **Modules SuSFS userspace** : le noyau fournit SuSFS v2.3.0 ; choisis un module compatible avec cette version. Les combinaisons n'ont pas toutes été testées.
 
 ---
@@ -396,7 +419,7 @@ Le hook d'origine, en mode SuSFS, n'agit que si le processus parent est reconnu 
 <summary><b>« Non pris en charge » / « No SukiSU kernel detected »</b></summary>
 
 1. Vérifie la ligne **Seccomp status** : si elle indique **Filter**, le driver n'a pas pu désactiver le seccomp du manager.
-2. Vérifie que tu utilises le manager **standard** `v4.3.0 (41100-6)` et pas « spoofed ».
+2. Vérifie que tu utilises le manager **standard** (`v4.3.0-r1 (41140-6)` testé) et pas « spoofed ».
 3. Si tu compiles toi-même : `SUKI_PIN` doit être défini (`b5917072`).
 4. Avec un PC, regarde le journal du noyau :
    ```bash
@@ -425,15 +448,15 @@ Le hook d'origine, en mode SuSFS, n'agit que si le processus parent est reconnu 
 <summary><b>Le build échoue sans raison apparente</b></summary>
 
 - Lance `bash -n scripts/build_kernel.sh` : une ligne tronquée ou un guillemet typographique sont les coupables habituels.
-- Télécharge `audit-v7.59.txt` : il liste les patchs rejetés, la config finale et les révisions utilisées. Pense à `if: always()` dans le workflow.
+- Télécharge `audit-v7.60.txt` : il liste les patchs rejetés, la config finale et les révisions utilisées. Pense à `if: always()` dans le workflow.
 </details>
 
 <details>
 <summary><b>Je veux vérifier que SuSFS est bien compilé</b></summary>
 
 ```bash
-grep -ci " susfs_" System.map-v7.59-susfs      # attendu : environ 85
-grep -E " (ksu_handle_setresuid|disable_seccomp|ksu_install_fd)$" System.map-v7.59-susfs
+grep -ci " susfs_" System.map-v7.60-susfs      # attendu : environ 85
+grep -E " (ksu_handle_setresuid|disable_seccomp|ksu_install_fd)$" System.map-v7.60-susfs
 ```
 Utilise le `System.map` du build, pas `/proc/kallsyms` (les symboles y sont masqués).
 </details>
